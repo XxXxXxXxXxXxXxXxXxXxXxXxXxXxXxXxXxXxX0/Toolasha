@@ -4,7 +4,9 @@
  */
 
 import settingsStorage from './settings-storage.js';
-import { settingsGroups } from './settings-schema.js';
+import {
+    settingsGroups
+} from './settings-schema.js';
 import dataManager from './data-manager.js';
 
 /**
@@ -58,7 +60,7 @@ class Config {
 
         // Feature toggles with metadata for future UI
         this.features = {
-// 市场功能 (Market Features)
+            // 市场功能 (Market Features)
             tooltipPrices: {
                 enabled: true,
                 name: '物品提示显示市场价',
@@ -186,8 +188,7 @@ class Config {
                 enabled: true,
                 name: '副本追踪器',
                 category: '战斗',
-                description:
-                    '在顶部栏实时追踪副本进度，包含波数时间、统计数据及组队频道完成消息',
+                description: '在顶部栏实时追踪副本进度，包含波数时间、统计数据及组队频道完成消息',
                 settingKey: 'dungeonTracker',
             },
             combatSimIntegration: {
