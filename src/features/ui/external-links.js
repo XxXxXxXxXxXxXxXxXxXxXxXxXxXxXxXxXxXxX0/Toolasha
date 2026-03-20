@@ -60,7 +60,7 @@ class ExternalLinks {
     addLinks(container) {
         const links = [
             {
-                label: 'Combat Sim',
+                label: '战斗模拟 shykai',
                 url: 'https://shykai.github.io/MWICombatSimulatorTest/dist/',
             },
             {
@@ -72,8 +72,8 @@ class ExternalLinks {
                 url: 'https://doh-nuts.github.io/Enhancelator/',
             },
             {
-                label: 'Milkonomy',
-                url: 'https://milkonomy.pages.dev/#/dashboard',
+                label: '利润计算 Milkonomy',
+                url: 'https://hyhfish.github.io/milkonomy/#/dashboard',
             },
             {
                 label: "Socko's Combat Tracker",
