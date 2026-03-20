@@ -61,10 +61,18 @@ export const settingsGroups = {
                 label: '左上角：动作条显示模式',
                 type: 'select',
                 default: 'full',
-                options: [
-                    { value: 'full', label: '详细 (所有属性 + 时间)' },
-                    { value: 'compact', label: '紧凑 (所有属性，限制宽度)' },
-                    { value: 'minimal', label: '精简 (仅剩余次数 + 时间)' },
+                options: [{
+                        value: 'full',
+                        label: '详细 (所有属性 + 时间)'
+                    },
+                    {
+                        value: 'compact',
+                        label: '紧凑 (所有属性，限制宽度)'
+                    },
+                    {
+                        value: 'minimal',
+                        label: '精简 (仅剩余次数 + 时间)'
+                    },
                 ],
                 help: '选择动作条显示的信息。详细模式显示所有统计；紧凑模式限制宽度以适配宽屏；精简模式仅显示剩余动作和完成时间。',
             },
@@ -97,9 +105,14 @@ export const settingsGroups = {
                 label: '动作队列：价值计算模式',
                 type: 'select',
                 default: 'profit',
-                options: [
-                    { value: 'profit', label: '总利润 (营收 - 所有成本)' },
-                    { value: 'estimated_value', label: '预估价值 (税后营收)' },
+                options: [{
+                        value: 'profit',
+                        label: '总利润 (营收 - 所有成本)'
+                    },
+                    {
+                        value: 'estimated_value',
+                        label: '预估价值 (税后营收)'
+                    },
                 ],
                 help: '选择如何计算队列动作的总价值。利润显示扣除材料和药水后的净收益；预估价值显示扣除市场税后的毛收入（结果始终为正）。',
             },
@@ -245,11 +258,22 @@ export const settingsGroups = {
                 label: '预期价值掉落列表显示',
                 type: 'select',
                 default: 'All',
-                options: [
-                    { value: 'Top 5', label: '价值前 5' },
-                    { value: 'Top 10', label: '价值前 10' },
-                    { value: 'All', label: '所有掉落' },
-                    { value: 'None', label: '仅显示摘要' },
+                options: [{
+                        value: 'Top 5',
+                        label: '价值前 5'
+                    },
+                    {
+                        value: 'Top 10',
+                        label: '价值前 10'
+                    },
+                    {
+                        value: 'All',
+                        label: '所有掉落'
+                    },
+                    {
+                        value: 'None',
+                        label: '仅显示摘要'
+                    },
                 ],
             },
             expectedValue_respectPricingMode: {
@@ -459,10 +483,18 @@ export const settingsGroups = {
                 label: '未排序（None）时的徽章类型',
                 type: 'select',
                 default: 'None',
-                options: [
-                    { value: 'None', label: '不显示' },
-                    { value: 'Ask', label: '卖一价 (Ask)' },
-                    { value: 'Bid', label: '买一价 (Bid)' }
+                options: [{
+                        value: 'None',
+                        label: '不显示'
+                    },
+                    {
+                        value: 'Ask',
+                        label: '卖一价 (Ask)'
+                    },
+                    {
+                        value: 'Bid',
+                        label: '买一价 (Bid)'
+                    }
                 ],
             },
             invSort_netOfTax: {
@@ -496,10 +528,18 @@ export const settingsGroups = {
                 label: '利润计算定价模式',
                 type: 'select',
                 default: 'hybrid',
-                options: [
-                    { value: 'conservative', label: '保守 (卖一/买一 - 快速交易)' },
-                    { value: 'hybrid', label: '混合 (卖一/卖一 - 即买耐卖)' },
-                    { value: 'optimistic', label: '乐观 (买一/卖一 - 耐心交易)' },
+                options: [{
+                        value: 'conservative',
+                        label: '保守 (卖一/买一 - 快速交易)'
+                    },
+                    {
+                        value: 'hybrid',
+                        label: '混合 (卖一/卖一 - 即买耐卖)'
+                    },
+                    {
+                        value: 'optimistic',
+                        label: '乐观 (买一/卖一 - 耐心交易)'
+                    },
                 ],
             },
             actions_artisanMaterialMode: {
@@ -507,9 +547,14 @@ export const settingsGroups = {
                 label: '缺失材料：工匠茶（Artisan）需求模式',
                 type: 'select',
                 default: 'expected',
-                options: [
-                    { value: 'expected', label: '期望值 (平均消耗)' },
-                    { value: 'worst-case', label: '最坏情况 (单次制作向上取整)' },
+                options: [{
+                        value: 'expected',
+                        label: '期望值 (平均消耗)'
+                    },
+                    {
+                        value: 'worst-case',
+                        label: '最坏情况 (单次制作向上取整)'
+                    },
                 ],
                 help: '在建议购买时，如何计算工匠茶对材料减少的影响。',
             },
@@ -525,12 +570,26 @@ export const settingsGroups = {
                 label: '开始使用计算成本的最低强化等级',
                 type: 'select',
                 default: 13,
-                options: [
-                    { value: 10, label: '+10 及以上' },
-                    { value: 11, label: '+11 及以上' },
-                    { value: 12, label: '+12 及以上' },
-                    { value: 13, label: '+13 及以上 (推荐)' },
-                    { value: 15, label: '+15 及以上' },
+                options: [{
+                        value: 10,
+                        label: '+10 及以上'
+                    },
+                    {
+                        value: 11,
+                        label: '+11 及以上'
+                    },
+                    {
+                        value: 12,
+                        label: '+12 及以上'
+                    },
+                    {
+                        value: 13,
+                        label: '+13 及以上 (推荐)'
+                    },
+                    {
+                        value: 15,
+                        label: '+15 及以上'
+                    },
                 ],
                 help: '停止信任市场价格并转用计算成本的强化等级阈值',
             },
@@ -691,9 +750,14 @@ export const settingsGroups = {
                 label: '战斗统计：定价模式',
                 type: 'select',
                 default: 'ask',
-                options: [
-                    { value: 'ask', label: '卖一价 (Ask)' },
-                    { value: 'bid', label: '买一价 (Bid)' }
+                options: [{
+                        value: 'ask',
+                        label: '卖一价 (Ask)'
+                    },
+                    {
+                        value: 'bid',
+                        label: '买一价 (Bid)'
+                    }
                 ],
                 help: '计算收入、钥匙成本和利润时使用卖一价（即买）还是买一价（耐买）。',
             },
@@ -701,39 +765,124 @@ export const settingsGroups = {
                 id: 'combatStatsChatMessage',
                 label: '战斗统计：聊天消息格式',
                 type: 'template',
-                default: [
-                    { type: 'text', value: '战斗统计: ' },
-                    { type: 'variable', key: '{duration}', label: '时长' },
-                    { type: 'text', value: ' 耗时 | ' },
-                    { type: 'variable', key: '{encountersPerHour}', label: '场次/小时' },
-                    { type: 'text', value: ' EPH | ' },
-                    { type: 'variable', key: '{income}', label: '总收入' },
-                    { type: 'text', value: ' 收入 | ' },
-                    { type: 'variable', key: '{dailyIncome}', label: '日收入' },
-                    { type: 'text', value: ' 收入/天 | ' },
-                    { type: 'variable', key: '{dailyConsumableCosts}', label: '日消耗成本' },
-                    { type: 'text', value: ' 消耗/天 | ' },
-                    { type: 'variable', key: '{dailyProfit}', label: '日利润' },
-                    { type: 'text', value: ' 利润/天 | ' },
-                    { type: 'variable', key: '{exp}', label: '经验/小时' },
-                    { type: 'text', value: ' 经验/h | ' },
-                    { type: 'variable', key: '{deathCount}', label: '死亡次数' },
-                    { type: 'text', value: ' 死亡' },
+                default: [{
+                        type: 'text',
+                        value: '战斗统计: '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{duration}',
+                        label: '时长'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 耗时 | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{encountersPerHour}',
+                        label: '场次/小时'
+                    },
+                    {
+                        type: 'text',
+                        value: ' EPH | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{income}',
+                        label: '总收入'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 收入 | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{dailyIncome}',
+                        label: '日收入'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 收入/天 | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{dailyConsumableCosts}',
+                        label: '日消耗成本'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 消耗/天 | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{dailyProfit}',
+                        label: '日利润'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 利润/天 | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{exp}',
+                        label: '经验/小时'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 经验/h | '
+                    },
+                    {
+                        type: 'variable',
+                        key: '{deathCount}',
+                        label: '死亡次数'
+                    },
+                    {
+                        type: 'text',
+                        value: ' 死亡'
+                    },
                 ],
                 help: 'Ctrl+点击统计面板中的玩家卡片时发送的消息格式。点击“编辑模板”自定义。',
-                templateVariables: [
-                    { key: '{duration}', label: '时长', description: '战斗阶段时长' },
-                    { key: '{encountersPerHour}', label: '场次/小时', description: '每小时遇敌次数 (EPH)' },
-                    { key: '{income}', label: '总收入', description: '战斗获得的总收入' },
-                    { key: '{dailyIncome}', label: '日收入', description: '平均每日收入' },
+                templateVariables: [{
+                        key: '{duration}',
+                        label: '时长',
+                        description: '战斗阶段时长'
+                    },
+                    {
+                        key: '{encountersPerHour}',
+                        label: '场次/小时',
+                        description: '每小时遇敌次数 (EPH)'
+                    },
+                    {
+                        key: '{income}',
+                        label: '总收入',
+                        description: '战斗获得的总收入'
+                    },
+                    {
+                        key: '{dailyIncome}',
+                        label: '日收入',
+                        description: '平均每日收入'
+                    },
                     {
                         key: '{dailyConsumableCosts}',
                         label: '日消耗成本',
                         description: '平均每日消耗品成本',
                     },
-                    { key: '{dailyProfit}', label: '日利润', description: '平均每日利润' },
-                    { key: '{exp}', label: '经验/小时', description: '每小时获得的经验' },
-                    { key: '{deathCount}', label: '死亡次数', description: '总死亡次数' },
+                    {
+                        key: '{dailyProfit}',
+                        label: '日利润',
+                        description: '平均每日利润'
+                    },
+                    {
+                        key: '{exp}',
+                        label: '经验/小时',
+                        description: '每小时获得的经验'
+                    },
+                    {
+                        key: '{deathCount}',
+                        label: '死亡次数',
+                        description: '总死亡次数'
+                    },
                 ],
             },
         },
@@ -761,9 +910,14 @@ export const settingsGroups = {
                 label: '效率算法',
                 type: 'select',
                 default: 'gold',
-                options: [
-                    { value: 'tokens', label: '每小时任务代币' },
-                    { value: 'gold', label: '每小时任务利润' },
+                options: [{
+                        value: 'tokens',
+                        label: '每小时任务代币'
+                    },
+                    {
+                        value: 'gold',
+                        label: '每小时任务利润'
+                    },
                 ],
                 help: '选择按代币产出还是按总利润进行评分。',
             },
@@ -820,9 +974,14 @@ export const settingsGroups = {
                 label: '任务排序模式',
                 type: 'select',
                 default: 'skill',
-                options: [
-                    { value: 'skill', label: '技能 / 区域' },
-                    { value: 'time', label: '完成所需时间' },
+                options: [{
+                        value: 'skill',
+                        label: '技能 / 区域'
+                    },
+                    {
+                        value: 'time',
+                        label: '完成所需时间'
+                    },
                 ],
                 help: '点击排序时的顺序。“完成时间”会让最快完成的任务排在前面；战斗任务和已完成任务排在最后。',
             },
@@ -934,9 +1093,14 @@ export const settingsGroups = {
                 label: '自动填充出售价格策略',
                 type: 'select',
                 default: 'match',
-                options: [
-                    { value: 'match', label: '匹配当前最低售价' },
-                    { value: 'undercut', label: '压价 1 (最低售价 - 1)' },
+                options: [{
+                        value: 'match',
+                        label: '匹配当前最低售价'
+                    },
+                    {
+                        value: 'undercut',
+                        label: '压价 1 (最低售价 - 1)'
+                    },
                 ],
                 help: '创建出售列表时，选择是匹配还是略低于当前的最低售价',
             },
@@ -945,10 +1109,18 @@ export const settingsGroups = {
                 label: '自动填充求购价格策略',
                 type: 'select',
                 default: 'outbid',
-                options: [
-                    { value: 'outbid', label: '加价 1 (最高求购价 + 1)' },
-                    { value: 'match', label: '匹配最高求购价' },
-                    { value: 'undercut', label: '压价 1 (最高求购价 - 1)' },
+                options: [{
+                        value: 'outbid',
+                        label: '加价 1 (最高求购价 + 1)'
+                    },
+                    {
+                        value: 'match',
+                        label: '匹配最高求购价'
+                    },
+                    {
+                        value: 'undercut',
+                        label: '压价 1 (最高求购价 - 1)'
+                    },
                 ],
                 help: '创建求购订单时，选择是加价竞争、匹配还是略低于当前最高价',
             },
@@ -1009,9 +1181,14 @@ export const settingsGroups = {
                 label: '市场：交易历史对比模式',
                 type: 'select',
                 default: 'instant',
-                options: [
-                    { value: 'instant', label: '即时 (Instant)' },
-                    { value: 'listing', label: '挂单 (Orders)' },
+                options: [{
+                        value: 'instant',
+                        label: '即时 (Instant)'
+                    },
+                    {
+                        value: 'listing',
+                        label: '挂单 (Orders)'
+                    },
                 ],
                 help: '即时模式：对比即时买/卖价。挂单模式：对比买/卖订单价。',
             },
@@ -1050,9 +1227,14 @@ export const settingsGroups = {
                 label: '市场：时长显示格式',
                 type: 'select',
                 default: 'datetime',
-                options: [
-                    { value: 'elapsed', label: '流逝时间 (如 "3h 45m")' },
-                    { value: 'datetime', label: '日期/时间 (如 "01-13 14:30")' },
+                options: [{
+                        value: 'elapsed',
+                        label: '流逝时间 (如 "3h 45m")'
+                    },
+                    {
+                        value: 'datetime',
+                        label: '日期/时间 (如 "01-13 14:30")'
+                    },
                 ],
                 help: '选择如何显示列表的创建时间',
             },
@@ -1061,9 +1243,14 @@ export const settingsGroups = {
                 label: '市场：日期时间格式中的小时制',
                 type: 'select',
                 default: '24hour',
-                options: [
-                    { value: '24hour', label: '24 小时制 (14:30)' },
-                    { value: '12hour', label: '12 小时制 (2:30 PM)' },
+                options: [{
+                        value: '24hour',
+                        label: '24 小时制 (14:30)'
+                    },
+                    {
+                        value: '12hour',
+                        label: '12 小时制 (2:30 PM)'
+                    },
                 ],
                 help: '使用日期/时间格式时的显示方式',
             },
@@ -1072,9 +1259,14 @@ export const settingsGroups = {
                 label: '市场：日期格式顺序',
                 type: 'select',
                 default: 'MM-DD',
-                options: [
-                    { value: 'MM-DD', label: '月-日 (01-13)' },
-                    { value: 'DD-MM', label: '日-月 (13-01)' },
+                options: [{
+                        value: 'MM-DD',
+                        label: '月-日 (01-13)'
+                    },
+                    {
+                        value: 'DD-MM',
+                        label: '日-月 (13-01)'
+                    },
                 ],
                 help: '使用日期/时间格式时的显示方式',
             },
