@@ -6,6 +6,7 @@ on:
 permissions:
     contents: write
     pull-requests: write
+    workflow_dispatch: # 添加这一行，允许手动触发
 
 jobs:
     format-release-notes:
