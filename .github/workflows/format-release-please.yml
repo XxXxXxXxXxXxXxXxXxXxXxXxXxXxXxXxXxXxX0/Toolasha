@@ -2,11 +2,11 @@ name: Format Release Please
 
 on:
     pull_request:
+    workflow_dispatch:
 
 permissions:
     contents: write
     pull-requests: write
-    workflow_dispatch: # 添加这一行，允许手动触发
 
 jobs:
     format-release-notes:
@@ -19,7 +19,7 @@ jobs:
               uses: actions/checkout@v6
               with:
                   ref: ${{ github.head_ref }}
-                  token: ${{ secrets.PAT }}
+                  token: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Setup Node.js
               uses: actions/setup-node@v6
