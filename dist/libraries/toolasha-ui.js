@@ -1,0 +1,21382 @@
+/**
+ * Toolasha UI Library
+ * UI enhancements, tasks, skills, and misc features
+ * Version: 1.44.0
+ * License: CC-BY-NC-SA-4.0
+ */
+
+(function (config, dataManager, domObserver, formatters_js, timerRegistry_js, domObserverHelpers_js, webSocketHook, reactInput_js, actionPanelHelper_js, expectedValueCalculator, equipmentParser_js, teaParser_js, bonusRevenueCalculator_js, marketData_js, profitConstants_js, efficiency_js, profitHelpers_js, profitCalculator, selectors_js, storage, marketAPI, cleanupRegistry_js, settingsSchema_js, settingsStorage, enhancementCalculator_js, enhancementConfig_js) {
+    'use strict';
+
+    window.Toolasha = window.Toolasha || {}; window.Toolasha.__buildTarget = "browser";
+
+    /**
+     * Equipment Level Display
+     * Shows item level in top right corner of equipment icons
+     * Based on original MWI Tools implementation
+     */
+
+
+    /**
+     * EquipmentLevelDisplay class adds level overlays to equipment icons
+     */
+    class EquipmentLevelDisplay {
+        constructor() {
+            this.unregisterHandler = null;
+            this.isActive = false;
+            this.processedDivs = new WeakSet(); // Track already-processed divs
+            this.isInitialized = false;
+        }
+
+        /**
+         * Setup setting change listener (always active, even when feature is disabled)
+         */
+        setupSettingListener() {
+            // Listen for main toggle changes
+            config.onSettingChange('itemIconLevel', (enabled) => {
+                if (enabled) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+
+            // Listen for key info toggle
+            config.onSettingChange('showsKeyInfoInIcon', () => {
+                if (this.isInitialized) {
+                    // Clear processed set and re-render
+                    this.processedDivs = new WeakSet();
+                    this.addItemLevels();
+                }
+            });
+
+            config.onSettingChange('color_accent', () => {
+                if (this.isInitialized) {
+                    this.refresh();
+                }
+            });
+        }
+
+        /**
+         * Initialize the equipment level display
+         */
+        initialize() {
+            if (!config.getSetting('itemIconLevel')) {
+                return;
+            }
+
+            if (this.isInitialized) {
+                return;
+            }
+
+            // Register with centralized DOM observer with debouncing
+            this.unregisterHandler = domObserver.register(
+                'EquipmentLevelDisplay',
+                () => {
+                    this.addItemLevels();
+                },
+                { debounce: true, debounceDelay: 150 } // 150ms debounce to reduce update frequency
+            );
+
+            // Process any existing items on page
+            this.addItemLevels();
+
+            this.isActive = true;
+            this.isInitialized = true;
+        }
+
+        /**
+         * Clean up
+         */
+        cleanup() {
+            if (this.unregisterHandler) {
+                this.unregisterHandler();
+                this.unregisterHandler = null;
+            }
+            this.isActive = false;
+        }
+
+        /**
+         * Add item levels to all equipment icons
+         * Matches original MWI Tools logic with dungeon key zone info
+         */
+        addItemLevels() {
+            // Find all item icon divs (the clickable containers)
+            const iconDivs = document.querySelectorAll(
+                'div.Item_itemContainer__x7kH1 div.Item_item__2De2O.Item_clickable__3viV6'
+            );
+
+            for (const div of iconDivs) {
+                if (this.processedDivs.has(div)) {
+                    continue;
+                }
+
+                // Skip if already has a name element (tooltip is open)
+                if (div.querySelector('div.Item_name__2C42x')) {
+                    continue;
+                }
+
+                // Get the use element inside this div
+                const useElement = div.querySelector('use');
+                if (!useElement) {
+                    continue;
+                }
+
+                const href = useElement.getAttribute('href');
+                if (!href) {
+                    continue;
+                }
+
+                // Extract item HRID (e.g., "#cheese_sword" -> "/items/cheese_sword")
+                const hrefName = href.split('#')[1];
+                const itemHrid = `/items/${hrefName}`;
+
+                // Get item details
+                const itemDetails = dataManager.getItemDetails(itemHrid);
+                if (!itemDetails) {
+                    continue;
+                }
+
+                // For equipment, show the level requirement (not itemLevel)
+                // For ability books, show the ability level requirement
+                // For dungeon entry keys, show zone index
+                let displayText = null;
+
+                if (itemDetails.equipmentDetail) {
+                    // Equipment: Use levelRequirements from equipmentDetail
+                    const levelReq = itemDetails.equipmentDetail.levelRequirements;
+                    if (levelReq && levelReq.length > 0 && levelReq[0].level > 0) {
+                        displayText = levelReq[0].level.toString();
+                    }
+                } else if (itemDetails.abilityBookDetail) {
+                    // Ability book: Use level requirement from abilityBookDetail
+                    const abilityLevelReq = itemDetails.abilityBookDetail.levelRequirements;
+                    if (abilityLevelReq && abilityLevelReq.length > 0 && abilityLevelReq[0].level > 0) {
+                        displayText = abilityLevelReq[0].level.toString();
+                    }
+                } else if (config.getSetting('showsKeyInfoInIcon') && this.isKeyOrFragment(itemHrid)) {
+                    // Keys and fragments: Show zone/dungeon info
+                    displayText = this.getKeyDisplayText(itemHrid);
+                }
+
+                // Add overlay if we have valid text to display
+                if (displayText && !div.querySelector('div.script_itemLevel')) {
+                    div.style.position = 'relative';
+
+                    // Position: bottom left for all items (matches market value style)
+                    const position = 'bottom: 2px; left: 2px; text-align: left;';
+
+                    div.insertAdjacentHTML(
+                        'beforeend',
+                        `<div class="script_itemLevel" style="z-index: 1; position: absolute; ${position} color: ${config.SCRIPT_COLOR_MAIN}; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 3px #000;">${displayText}</div>`
+                    );
+                    // Mark as processed
+                    this.processedDivs.add(div);
+                } else {
+                    // No valid text or already has overlay, mark as processed
+                    this.processedDivs.add(div);
+                }
+            }
+        }
+
+        /**
+         * Check if item is a key or fragment
+         * @param {string} itemHrid - Item HRID
+         * @returns {boolean} True if item is a key or fragment
+         */
+        isKeyOrFragment(itemHrid) {
+            return itemHrid.includes('_key') || itemHrid.includes('_fragment');
+        }
+
+        /**
+         * Get display text for keys and fragments
+         * Uses hardcoded mapping like MWI Tools
+         * @param {string} itemHrid - Key/fragment HRID
+         * @returns {string|null} Display text (e.g., "D1", "Z3", "3.4.5.6") or null
+         */
+        getKeyDisplayText(itemHrid) {
+            const keyMap = new Map([
+                // Key fragments (zones where they drop)
+                ['/items/blue_key_fragment', 'Z3'],
+                ['/items/green_key_fragment', 'Z4'],
+                ['/items/purple_key_fragment', 'Z5'],
+                ['/items/white_key_fragment', 'Z6'],
+                ['/items/orange_key_fragment', 'Z7'],
+                ['/items/brown_key_fragment', 'Z8'],
+                ['/items/stone_key_fragment', 'Z9'],
+                ['/items/dark_key_fragment', 'Z10'],
+                ['/items/burning_key_fragment', 'Z11'],
+
+                // Entry keys (dungeon identifiers)
+                ['/items/chimerical_entry_key', 'D1'],
+                ['/items/sinister_entry_key', 'D2'],
+                ['/items/enchanted_entry_key', 'D3'],
+                ['/items/pirate_entry_key', 'D4'],
+
+                // Chest keys (zones where they drop)
+                ['/items/chimerical_chest_key', '3.4.5.6'],
+                ['/items/sinister_chest_key', '5.7.8.10'],
+                ['/items/enchanted_chest_key', '7.8.9.11'],
+                ['/items/pirate_chest_key', '6.9.10.11'],
+            ]);
+
+            return keyMap.get(itemHrid) || null;
+        }
+
+        /**
+         * Refresh colors (called when settings change)
+         */
+        refresh() {
+            // Update color for all level overlays
+            const overlays = document.querySelectorAll('div.script_itemLevel');
+            overlays.forEach((overlay) => {
+                overlay.style.color = config.COLOR_ACCENT;
+            });
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            if (this.unregisterHandler) {
+                this.unregisterHandler();
+                this.unregisterHandler = null;
+            }
+
+            // Remove all level overlays
+            const overlays = document.querySelectorAll('div.script_itemLevel');
+            for (const overlay of overlays) {
+                overlay.remove();
+            }
+
+            // Clear processed tracking
+            this.processedDivs = new WeakSet();
+
+            this.isActive = false;
+            this.isInitialized = false;
+        }
+    }
+
+    const equipmentLevelDisplay = new EquipmentLevelDisplay();
+
+    equipmentLevelDisplay.setupSettingListener();
+
+    /**
+     * Alchemy Item Dimming
+     * Dims items in alchemy panel that require higher level than player has
+     * Player must have Alchemy level >= itemLevel to perform alchemy actions
+     */
+
+
+    /**
+     * AlchemyItemDimming class dims items based on level requirements
+     */
+    class AlchemyItemDimming {
+        constructor() {
+            this.unregisterObserver = null; // Unregister function from centralized observer
+            this.isActive = false;
+            this.processedDivs = new WeakSet(); // Track already-processed divs
+            this.isInitialized = false;
+        }
+
+        /**
+         * Initialize the alchemy item dimming
+         */
+        initialize() {
+            // Guard FIRST (before feature check)
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('alchemyItemDimming')) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Register with centralized observer to watch for alchemy panel
+            this.unregisterObserver = domObserver.onClass('AlchemyItemDimming', 'ItemSelector_menu__12sEM', () => {
+                this.processAlchemyItems();
+            });
+
+            // Process any existing items on page
+            this.processAlchemyItems();
+
+            this.isActive = true;
+        }
+
+        /**
+         * Process all items in the alchemy panel
+         */
+        processAlchemyItems() {
+            // Check if alchemy panel is open
+            const alchemyPanel = this.findAlchemyPanel();
+            if (!alchemyPanel) {
+                return;
+            }
+
+            // Get player's Alchemy level
+            const skills = dataManager.getSkills();
+            if (!skills) {
+                return;
+            }
+
+            const alchemySkill = skills.find((s) => s.skillHrid === '/skills/alchemy');
+            if (!alchemySkill) {
+                console.error('[AlchemyItemDimming] Skill not found: /skills/alchemy');
+            }
+            const playerAlchemyLevel = alchemySkill?.level || 1;
+
+            // Find all item icon divs within the alchemy panel
+            const iconDivs = alchemyPanel.querySelectorAll(
+                'div.Item_itemContainer__x7kH1 div.Item_item__2De2O.Item_clickable__3viV6'
+            );
+
+            for (const div of iconDivs) {
+                if (this.processedDivs.has(div)) {
+                    continue;
+                }
+
+                // Get the use element inside this div
+                const useElement = div.querySelector('use');
+                if (!useElement) {
+                    continue;
+                }
+
+                const href = useElement.getAttribute('href');
+                if (!href) {
+                    continue;
+                }
+
+                // Extract item HRID (e.g., "#cheese_sword" -> "/items/cheese_sword")
+                const hrefName = href.split('#')[1];
+                const itemHrid = `/items/${hrefName}`;
+
+                // Get item details
+                const itemDetails = dataManager.getItemDetails(itemHrid);
+                if (!itemDetails) {
+                    continue;
+                }
+
+                // Get item's alchemy level requirement
+                const itemLevel = itemDetails.itemLevel || 0;
+
+                // Apply dimming if player level is too low
+                if (playerAlchemyLevel < itemLevel) {
+                    div.style.opacity = '0.5';
+                    div.style.pointerEvents = 'auto'; // Still clickable
+                    div.classList.add('mwi-alchemy-dimmed');
+                } else {
+                    // Remove dimming if level is now sufficient (player leveled up)
+                    div.style.opacity = '1';
+                    div.classList.remove('mwi-alchemy-dimmed');
+                }
+
+                // Mark as processed
+                this.processedDivs.add(div);
+            }
+        }
+
+        /**
+         * Find the alchemy panel in the DOM
+         * @returns {Element|null} Alchemy panel element or null
+         */
+        findAlchemyPanel() {
+            // The alchemy item selector is a MuiTooltip dropdown with ItemSelector_menu class
+            // It appears when clicking in the "Alchemize Item" box
+            const itemSelectorMenus = document.querySelectorAll('div.ItemSelector_menu__12sEM');
+
+            // Check each menu to find the one with "Alchemize Item" label
+            for (const menu of itemSelectorMenus) {
+                // Look for the ItemSelector_label element in the document
+                // (It's not a direct sibling, it's part of the button that opens this menu)
+                const alchemyLabels = document.querySelectorAll('div.ItemSelector_label__22ds9');
+
+                for (const label of alchemyLabels) {
+                    if (label.textContent.trim() === 'Alchemize Item') {
+                        // Found the alchemy label, this menu is likely the alchemy selector
+                        return menu;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            // Remove all dimming effects
+            const dimmedItems = document.querySelectorAll('.mwi-alchemy-dimmed');
+            for (const item of dimmedItems) {
+                item.style.opacity = '1';
+                item.classList.remove('mwi-alchemy-dimmed');
+            }
+
+            // Clear processed tracking
+            this.processedDivs = new WeakSet();
+
+            this.isActive = false;
+            this.isInitialized = false;
+        }
+    }
+
+    const alchemyItemDimming = new AlchemyItemDimming();
+
+    /**
+     * Skill Experience Percentage Display
+     * Shows XP progress percentage in the left sidebar skill list
+     */
+
+
+    class SkillExperiencePercentage {
+        constructor() {
+            this.isActive = false;
+            this.unregisterHandlers = [];
+            this.processedBars = new Set();
+            this.isInitialized = false;
+            this.updateInterval = null;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.progressBarObservers = new Map(); // Track MutationObservers for each progress bar
+        }
+
+        /**
+         * Setup setting change listener (always active, even when feature is disabled)
+         */
+        setupSettingListener() {
+            // Listen for main toggle changes
+            config.onSettingChange('skillExperiencePercentage', (enabled) => {
+                if (enabled) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+
+            config.onSettingChange('color_accent', () => {
+                if (this.isInitialized) {
+                    this.refresh();
+                }
+            });
+        }
+
+        /**
+         * Initialize the display system
+         */
+        initialize() {
+            if (!config.isFeatureEnabled('skillExperiencePercentage')) {
+                return;
+            }
+
+            if (this.isInitialized) {
+                return;
+            }
+
+            this.isActive = true;
+            this.registerObservers();
+
+            // Setup observers for any existing progress bars
+            const existingProgressBars = document.querySelectorAll('[class*="NavigationBar_currentExperience"]');
+            existingProgressBars.forEach((progressBar) => {
+                this.setupProgressBarObserver(progressBar);
+            });
+
+            this.isInitialized = true;
+        }
+
+        /**
+         * Register DOM observers
+         */
+        registerObservers() {
+            // Watch for progress bars appearing
+            const unregister = domObserver.onClass(
+                'SkillExpPercentage',
+                'NavigationBar_currentExperience',
+                (progressBar) => {
+                    this.setupProgressBarObserver(progressBar);
+                }
+            );
+            this.unregisterHandlers.push(unregister);
+        }
+
+        /**
+         * Setup MutationObserver for a progress bar to watch for style changes
+         * @param {HTMLElement} progressBar - The progress bar element
+         */
+        setupProgressBarObserver(progressBar) {
+            // Skip if we're already observing this progress bar
+            if (this.progressBarObservers.has(progressBar)) {
+                return;
+            }
+
+            // Initial update
+            this.updateSkillPercentage(progressBar);
+
+            // Watch for style attribute changes (width percentage updates)
+            const unwatch = domObserverHelpers_js.createMutationWatcher(
+                progressBar,
+                () => {
+                    this.updateSkillPercentage(progressBar);
+                },
+                {
+                    attributes: true,
+                    attributeFilter: ['style'],
+                }
+            );
+
+            // Store the observer so we can clean it up later
+            this.progressBarObservers.set(progressBar, unwatch);
+        }
+
+        /**
+         * Update a single skill's percentage display
+         * @param {Element} progressBar - The progress bar element
+         */
+        updateSkillPercentage(progressBar) {
+            // Get the skill container
+            const skillContainer = progressBar.parentNode?.parentNode;
+            if (!skillContainer) return;
+
+            // Get the level display container (first child of skill container)
+            const levelContainer = skillContainer.children[0];
+            if (!levelContainer) return;
+
+            // Find the NavigationBar_level span to set its width
+            const levelSpan = skillContainer.querySelector('[class*="NavigationBar_level"]');
+            if (levelSpan) {
+                levelSpan.style.width = 'auto';
+            }
+
+            // Extract percentage from progress bar width
+            const widthStyle = progressBar.style.width;
+            if (!widthStyle) return;
+
+            const percentage = parseFloat(widthStyle.replace('%', ''));
+            if (isNaN(percentage)) return;
+
+            // Format with 1 decimal place (convert from percentage to decimal first)
+            const formattedPercentage = formatters_js.formatPercentage(percentage / 100, 1);
+
+            // Check if we already have a percentage span
+            let percentageSpan = levelContainer.querySelector('.mwi-exp-percentage');
+
+            if (percentageSpan) {
+                // Update existing span
+                if (percentageSpan.textContent !== formattedPercentage) {
+                    percentageSpan.textContent = formattedPercentage;
+                }
+            } else {
+                // Create new span
+                percentageSpan = document.createElement('span');
+                percentageSpan.className = 'mwi-exp-percentage';
+                percentageSpan.textContent = formattedPercentage;
+                percentageSpan.style.fontSize = '0.875rem';
+                percentageSpan.style.color = config.SCRIPT_COLOR_MAIN;
+
+                // Insert percentage before children[1] (same as original)
+                levelContainer.insertBefore(percentageSpan, levelContainer.children[1]);
+            }
+        }
+
+        /**
+         * Refresh colors (called when settings change)
+         */
+        refresh() {
+            // Update all existing percentage spans with new color
+            const percentageSpans = document.querySelectorAll('.mwi-exp-percentage');
+            percentageSpans.forEach((span) => {
+                span.style.color = config.COLOR_ACCENT;
+            });
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            this.timerRegistry.clearAll();
+            this.updateInterval = null;
+
+            // Disconnect all progress bar observers
+            this.progressBarObservers.forEach((unwatch) => {
+                unwatch();
+            });
+            this.progressBarObservers.clear();
+
+            // Remove all percentage spans
+            document.querySelectorAll('.mwi-exp-percentage').forEach((span) => span.remove());
+
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+
+            this.processedBars.clear();
+            this.isActive = false;
+            this.isInitialized = false;
+        }
+    }
+
+    const skillExperiencePercentage = new SkillExperiencePercentage();
+
+    skillExperiencePercentage.setupSettingListener();
+
+    /**
+     * External Links
+     * Adds links to external MWI tools in the left sidebar navigation
+     */
+
+
+    class ExternalLinks {
+        constructor() {
+            this.unregisterObserver = null;
+            this.addedContainers = new WeakSet(); // Track which specific containers have links
+            this.isInitialized = false;
+        }
+
+        /**
+         * Initialize external links feature
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('ui_externalLinks')) {
+                return;
+            }
+
+            this.isInitialized = true;
+            this.setupObserver();
+        }
+
+        /**
+         * Setup DOM observer to watch for navigation bar
+         */
+        setupObserver() {
+            // Wait for the minor navigation links container
+            this.unregisterObserver = domObserver.onClass(
+                'ExternalLinks',
+                'NavigationBar_minorNavigationLinks',
+                (container) => {
+                    if (!this.addedContainers.has(container)) {
+                        this.addLinks(container);
+                        this.addedContainers.add(container);
+                    }
+                }
+            );
+
+            // Check for existing container immediately
+            const existingContainer = document.querySelector('[class*="NavigationBar_minorNavigationLinks"]');
+            if (existingContainer && !this.addedContainers.has(existingContainer)) {
+                this.addLinks(existingContainer);
+                this.addedContainers.add(existingContainer);
+            }
+        }
+
+        /**
+         * Add external tool links to navigation bar
+         * @param {HTMLElement} container - Navigation links container
+         */
+        addLinks(container) {
+            const links = [
+                {
+                    label: '战斗模拟 shykai',
+                    url: 'https://shykai.github.io/MWICombatSimulatorTest/dist/',
+                },
+                {
+                    label: 'Milkyway Market',
+                    url: 'https://milkyway.market/',
+                },
+                {
+                    label: 'Enhancelator',
+                    url: 'https://doh-nuts.github.io/Enhancelator/',
+                },
+                {
+                    label: '利润计算 Milkonomy',
+                    url: 'https://hyhfish.github.io/milkonomy/#/dashboard',
+                },
+                {
+                    label: "Socko's Combat Tracker",
+                    url: 'https://sockosnewcombattracker.pages.dev/',
+                },
+            ];
+
+            // Add each link (in reverse order so they appear in correct order when prepended)
+            for (let i = links.length - 1; i >= 0; i--) {
+                const link = links[i];
+                this.addLink(container, link.label, link.url);
+            }
+        }
+
+        /**
+         * Add a single external link to the navigation
+         * @param {HTMLElement} container - Navigation links container
+         * @param {string} label - Link label
+         * @param {string} url - External URL
+         */
+        addLink(container, label, url) {
+            const div = document.createElement('div');
+            div.setAttribute('class', 'NavigationBar_minorNavigationLink__31K7Y');
+            div.style.color = config.COLOR_ACCENT;
+            div.style.cursor = 'pointer';
+            div.textContent = label;
+
+            div.addEventListener('click', () => {
+                window.open(url, '_blank');
+            });
+
+            // Insert at the beginning (after Settings if it exists)
+            container.insertAdjacentElement('afterbegin', div);
+        }
+
+        /**
+         * Disable the external links feature
+         */
+        disable() {
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            // Remove added links
+            const container = document.querySelector('[class*="NavigationBar_minorNavigationLinks"]');
+            if (container) {
+                const linksToRemove = container.querySelectorAll('[style*="cursor: pointer"]');
+                linksToRemove.forEach((link) => {
+                    // Only remove links we added (check if they have our color)
+                    if (link.style.color === config.COLOR_ACCENT) {
+                        link.remove();
+                    }
+                });
+            }
+
+            // Clear the WeakSet (create new instance)
+            this.addedContainers = new WeakSet();
+            this.isInitialized = false;
+        }
+    }
+
+    const externalLinks = new ExternalLinks();
+
+    /**
+     * Item Navigation Utilities
+     * Handles Alt+click navigation to crafting/gathering actions or item dictionary
+     */
+
+
+    /**
+     * Get game object via React fiber tree traversal
+     * @returns {Object|null} Game component instance
+     */
+    function getGameObject$2() {
+        const rootEl = document.getElementById('root');
+        const rootFiber = rootEl?._reactRootContainer?.current || rootEl?._reactRootContainer?._internalRoot?.current;
+        if (!rootFiber) return null;
+
+        function find(fiber) {
+            if (!fiber) return null;
+            if (fiber.stateNode?.handleGoToMarketplace) return fiber.stateNode;
+            return find(fiber.child) || find(fiber.sibling);
+        }
+
+        return find(rootFiber);
+    }
+
+    /**
+     * Find which action produces a given item
+     * Prioritizes production actions over gathering actions
+     * @param {string} itemHrid - Item HRID to search for
+     * @returns {Object|null} { actionHrid, type: 'production'|'gathering' } or null
+     */
+    function findActionForItem(itemHrid) {
+        const gameData = dataManager.getInitClientData();
+        if (!gameData?.actionDetailMap) {
+            return null;
+        }
+
+        const itemSlug = itemHrid.split('/').pop();
+
+        // First pass: Look for production actions (outputItems)
+        const productionMatches = [];
+        for (const [actionHrid, action] of Object.entries(gameData.actionDetailMap)) {
+            if (action.outputItems?.some((item) => item.itemHrid === itemHrid)) {
+                productionMatches.push(actionHrid);
+            }
+        }
+        if (productionMatches.length > 0) {
+            const exact = productionMatches.find((a) => a.split('/').pop() === itemSlug);
+            return { actionHrid: exact || productionMatches[0], type: 'production' };
+        }
+
+        // Second pass: Look for gathering actions (dropTable)
+        const gatheringMatches = [];
+        for (const [actionHrid, action] of Object.entries(gameData.actionDetailMap)) {
+            if (action.dropTable?.some((drop) => drop.itemHrid === itemHrid)) {
+                gatheringMatches.push(actionHrid);
+            }
+        }
+        if (gatheringMatches.length > 0) {
+            const exact = gatheringMatches.find((a) => a.split('/').pop() === itemSlug);
+            return { actionHrid: exact || gatheringMatches[0], type: 'gathering' };
+        }
+
+        return null;
+    }
+
+    /**
+     * Navigate to the action page for an item, or item dictionary if no action found
+     * @param {string} itemHrid - Item HRID to navigate to
+     * @returns {boolean} True if navigation was attempted, false if game API unavailable
+     */
+    function navigateToItem(itemHrid) {
+        const game = getGameObject$2();
+        if (!game) {
+            return false;
+        }
+
+        // Try to find action that produces this item
+        const actionInfo = findActionForItem(itemHrid);
+
+        if (actionInfo && game.handleGoToAction) {
+            // Navigate to the action page
+            game.handleGoToAction(actionInfo.actionHrid);
+            return true;
+        } else if (game.handleOpenItemDictionary) {
+            // Fallback to item dictionary
+            game.handleOpenItemDictionary(itemHrid);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Alt+Click Item Navigation Feature
+     * Adds Alt+click handlers to item tooltips and inventory/marketplace items
+     */
+
+
+    class AltClickNavigation {
+        constructor() {
+            this.isActive = false;
+            this.unregisterObserver = null;
+            this.clickHandler = null;
+            this.currentItemHrid = null;
+        }
+
+        /**
+         * Setup settings listener
+         */
+        setupSettingListener() {
+            config.onSettingChange('altClickNavigation', (value) => {
+                if (value) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+        }
+
+        /**
+         * Initialize Alt+click navigation
+         */
+        initialize() {
+            if (this.isActive) {
+                return;
+            }
+
+            if (!config.getSetting('altClickNavigation')) {
+                return;
+            }
+
+            // Watch for tooltip poppers to track current hovered item
+            this.unregisterObserver = domObserver.onClass('AltClickNav', 'MuiTooltip-popper', (tooltipElement) => {
+                this.handleTooltipAppear(tooltipElement);
+            });
+
+            // Create global click handler for Alt+click
+            this.clickHandler = (event) => {
+                // Only handle Alt+click
+                if (!event.altKey) {
+                    return;
+                }
+
+                // Try multiple strategies to find item HRID
+                let itemHrid = null;
+
+                // Strategy 1: Check for data-item-hrid attribute (our custom tabs, etc.)
+                const dataItemElement = event.target.closest('[data-item-hrid]');
+                if (dataItemElement) {
+                    itemHrid = dataItemElement.getAttribute('data-item-hrid');
+                }
+
+                // Strategy 2: If clicking while tooltip is visible, use tracked item
+                if (!itemHrid && this.currentItemHrid) {
+                    itemHrid = this.currentItemHrid;
+                }
+
+                // Strategy 3: Check parent chain for item link hrefs
+                if (!itemHrid) {
+                    const linkElement = event.target.closest('a[href*="/items/"]');
+                    if (linkElement) {
+                        const href = linkElement.getAttribute('href');
+                        const match = href.match(/\/items\/(.+?)(?:\/|$)/);
+                        if (match) {
+                            itemHrid = `/items/${match[1]}`;
+                        }
+                    }
+                }
+
+                if (!itemHrid) {
+                    return;
+                }
+
+                // Navigate to item
+                event.preventDefault();
+                event.stopPropagation();
+                navigateToItem(itemHrid);
+            };
+
+            // Attach global click handler (capture phase to intercept before game handlers)
+            document.addEventListener('click', this.clickHandler, true);
+
+            this.isActive = true;
+        }
+
+        /**
+         * Handle tooltip appearance - extract item HRID
+         * @param {HTMLElement} tooltipElement - Tooltip popper element
+         */
+        handleTooltipAppear(tooltipElement) {
+            // Reset current item
+            this.currentItemHrid = null;
+
+            try {
+                // Look for item link in tooltip content
+                const itemLink = tooltipElement.querySelector('a[href*="/items/"]');
+
+                if (itemLink) {
+                    const href = itemLink.getAttribute('href');
+
+                    const match = href.match(/\/items\/(.+?)(?:\/|$)/);
+                    if (match) {
+                        this.currentItemHrid = `/items/${match[1]}`;
+                        return;
+                    }
+                }
+
+                // Try to find item from SVG icon href
+                const svgUse = tooltipElement.querySelector('use[href*="items_sprite"]');
+                if (svgUse) {
+                    const svgHref = svgUse.getAttribute('href');
+
+                    // Extract item name from sprite reference: /static/media/items_sprite.hash.svg#item_name
+                    const match = svgHref.match(/#(.+)$/);
+                    if (match) {
+                        const itemName = match[1];
+                        // Convert sprite item name to HRID format
+                        this.currentItemHrid = `/items/${itemName}`;
+                        return;
+                    }
+                }
+
+                // Try to extract from ItemTooltipText_name div
+                const nameElement = tooltipElement.querySelector(
+                    '.ItemTooltipText_name__2JAHA span, [class*="ItemTooltipText_name"] span'
+                );
+                if (nameElement) {
+                    const itemName = nameElement.textContent.trim();
+
+                    // Convert name to HRID format (lowercase, replace spaces with underscores)
+                    const itemHrid = `/items/${itemName.toLowerCase().replace(/\s+/g, '_')}`;
+                    this.currentItemHrid = itemHrid;
+                }
+            } catch (error) {
+                console.error('[AltClickNav] Error parsing tooltip:', error);
+            }
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            if (this.clickHandler) {
+                document.removeEventListener('click', this.clickHandler, true);
+                this.clickHandler = null;
+            }
+
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            this.currentItemHrid = null;
+            this.isActive = false;
+        }
+    }
+
+    const altClickNavigation = new AltClickNavigation();
+    altClickNavigation.setupSettingListener();
+
+    /**
+     * Collection Navigation
+     * Adds "View Action" and "Item Dictionary" buttons when clicking collection items.
+     * Works for both collected items (injects into game popover) and uncollected items
+     * (shows a custom popover since the game provides no interaction for those).
+     */
+
+
+    /**
+     * Get game object via React fiber tree traversal
+     * @returns {Object|null} Game component instance
+     */
+    function getGameObject$1() {
+        const rootEl = document.getElementById('root');
+        const rootFiber = rootEl?._reactRootContainer?.current || rootEl?._reactRootContainer?._internalRoot?.current;
+        if (!rootFiber) return null;
+
+        function find(fiber) {
+            if (!fiber) return null;
+            if (fiber.stateNode?.handleGoToMarketplace) return fiber.stateNode;
+            return find(fiber.child) || find(fiber.sibling);
+        }
+
+        return find(rootFiber);
+    }
+
+    class CollectionNavigation {
+        constructor() {
+            this.unregisterHandlers = [];
+            this.isInitialized = false;
+            this.activePopover = null;
+            this.outsideClickHandler = null;
+            this.escapeKeyHandler = null;
+            this.itemNameToHridCache = null;
+            this.itemNameToHridCacheSource = null;
+            this.panelObserver = null;
+        }
+
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.isFeatureEnabled('collectionNavigation')) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Watch for uncollected (gray) collection tiles added to the DOM
+            const unregisterTiles = domObserver.onClass('CollectionNavigation', 'Collection_collection', (tile) => {
+                this.handleCollectionTile(tile);
+            });
+            this.unregisterHandlers.push(unregisterTiles);
+
+            // Watch for the collection panel appearing so we can attach a rescan observer
+            // (covers filter checkbox toggles that show/hide existing tiles without re-adding them)
+            const unregisterPanel = domObserver.onClass('CollectionNavigation', 'Collection_collections', (panel) => {
+                this.attachPanelObserver(panel);
+                this.rescanGrayTiles(panel);
+            });
+            this.unregisterHandlers.push(unregisterPanel);
+
+            // Also attach to any panel already in the DOM
+            const existingPanel = document.querySelector('[class*="Collection_collections"]');
+            if (existingPanel) {
+                this.attachPanelObserver(existingPanel);
+            }
+
+            // Watch for collected item popovers (MuiTooltip containing Collection_actionMenu)
+            const unregisterTooltips = domObserver.onClass('CollectionNavigation', 'MuiTooltip-popper', (tooltipEl) => {
+                this.handleTooltip(tooltipEl);
+            });
+            this.unregisterHandlers.push(unregisterTooltips);
+
+            // Process any tiles already in the DOM
+            document.querySelectorAll('[class*="Collection_tierGray"]').forEach((tile) => {
+                this.handleCollectionTile(tile);
+            });
+        }
+
+        disable() {
+            this.dismissPopover();
+            this.unregisterHandlers.forEach((fn) => fn());
+            this.unregisterHandlers = [];
+            if (this.panelObserver) {
+                this.panelObserver.disconnect();
+                this.panelObserver = null;
+            }
+            this.isInitialized = false;
+        }
+
+        /**
+         * Attach a MutationObserver to the collection panel to catch filter toggles
+         * that show/hide existing tiles without re-adding them to the DOM.
+         * @param {Element} panel
+         */
+        attachPanelObserver(panel) {
+            if (this.panelObserver) {
+                return; // Already attached
+            }
+            this.panelObserver = new MutationObserver(() => {
+                this.rescanGrayTiles(panel);
+            });
+            this.panelObserver.observe(panel, { childList: true, subtree: true });
+        }
+
+        /**
+         * Scan all currently visible gray tiles in the panel and attach listeners to any not yet marked.
+         * @param {Element} panel
+         */
+        rescanGrayTiles(panel) {
+            const tiles = panel.querySelectorAll('[class*="Collection_tierGray"]');
+            tiles.forEach((tile) => this.handleCollectionTile(tile));
+        }
+
+        /**
+         * Attach click listener to uncollected (gray) tiles
+         * @param {Element} tile
+         */
+        handleCollectionTile(tile) {
+            // If we got a container instead of the tile itself, find the tile inside
+            let targetTile = tile;
+            if (!tile.className.includes('Collection_tierGray')) {
+                targetTile = tile.querySelector('[class*="Collection_tierGray"]');
+                if (!targetTile) {
+                    return;
+                }
+            }
+
+            // Avoid duplicate listeners
+            if (targetTile.dataset.mwiCollectionNav) {
+                return;
+            }
+            targetTile.dataset.mwiCollectionNav = 'true';
+
+            targetTile.style.cursor = 'pointer';
+
+            targetTile.addEventListener('click', (event) => {
+                event.stopPropagation();
+
+                const itemHrid = this.extractHridFromTile(targetTile);
+                if (!itemHrid) {
+                    return;
+                }
+
+                this.showPopover(targetTile, itemHrid);
+            });
+        }
+
+        /**
+         * Show a custom popover for an uncollected item
+         * @param {Element} tile - The collection tile element
+         * @param {string} itemHrid - The item HRID
+         */
+        showPopover(tile, itemHrid) {
+            this.dismissPopover();
+
+            const itemDetails = dataManager.getItemDetails(itemHrid);
+            const itemName = itemDetails?.name || itemHrid.split('/').pop().replace(/_/g, ' ');
+
+            const rect = tile.getBoundingClientRect();
+
+            const popover = document.createElement('div');
+            popover.className = 'mwi-collection-popover';
+            popover.style.cssText = `
+            position: fixed;
+            z-index: 9999;
+            background: #1a1a2e;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 4px;
+            padding: 8px;
+            min-width: 160px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+        `;
+
+            // Item name header
+            const nameDiv = document.createElement('div');
+            nameDiv.textContent = itemName;
+            nameDiv.style.cssText = `
+            font-weight: 600;
+            font-size: 14px;
+            color: #fff;
+            margin-bottom: 8px;
+            text-align: center;
+        `;
+            popover.appendChild(nameDiv);
+
+            // View Action button
+            const viewActionBtn = this.createNavButton('View Action', () => {
+                this.dismissPopover();
+                navigateToItem(itemHrid);
+            });
+            popover.appendChild(viewActionBtn);
+
+            // Item Dictionary button
+            const dictBtn = this.createNavButton('Item Dictionary', () => {
+                this.dismissPopover();
+                const game = getGameObject$1();
+                if (game?.handleOpenItemDictionary) {
+                    game.handleOpenItemDictionary(itemHrid);
+                }
+            });
+            popover.appendChild(dictBtn);
+
+            document.body.appendChild(popover);
+            this.activePopover = popover;
+
+            // Position below the tile, aligned to its left edge
+            const popoverWidth = 160;
+            let left = rect.left + window.scrollX;
+            const top = rect.bottom + window.scrollY + 4;
+
+            // Keep within viewport horizontally
+            if (left + popoverWidth > window.innerWidth) {
+                left = window.innerWidth - popoverWidth - 8;
+            }
+
+            popover.style.left = `${left}px`;
+            popover.style.top = `${top}px`;
+
+            // Dismiss on outside click
+            this.outsideClickHandler = (e) => {
+                if (!popover.contains(e.target) && e.target !== tile) {
+                    this.dismissPopover();
+                }
+            };
+            setTimeout(() => {
+                document.addEventListener('mousedown', this.outsideClickHandler);
+            }, 0);
+
+            // Dismiss on Escape
+            this.escapeKeyHandler = (e) => {
+                if (e.key === 'Escape') {
+                    this.dismissPopover();
+                }
+            };
+            document.addEventListener('keydown', this.escapeKeyHandler);
+        }
+
+        /**
+         * Remove the active custom popover and clean up event listeners
+         */
+        dismissPopover() {
+            if (this.activePopover) {
+                this.activePopover.remove();
+                this.activePopover = null;
+            }
+
+            if (this.outsideClickHandler) {
+                document.removeEventListener('mousedown', this.outsideClickHandler);
+                this.outsideClickHandler = null;
+            }
+
+            if (this.escapeKeyHandler) {
+                document.removeEventListener('keydown', this.escapeKeyHandler);
+                this.escapeKeyHandler = null;
+            }
+        }
+
+        /**
+         * Inject navigation buttons into the game's collected-item popover
+         * @param {Element} tooltipEl - MuiTooltip-popper element
+         */
+        handleTooltip(tooltipEl) {
+            if (tooltipEl.dataset.mwiCollectionEnhanced) {
+                return;
+            }
+
+            const actionMenu = tooltipEl.querySelector('[class*="Collection_actionMenu"]');
+            if (!actionMenu) {
+                return;
+            }
+
+            tooltipEl.dataset.mwiCollectionEnhanced = 'true';
+
+            const nameEl = tooltipEl.querySelector('[class*="Collection_name"]');
+            if (!nameEl) {
+                return;
+            }
+
+            const itemHrid = this.extractItemHridFromName(nameEl.textContent.trim());
+            if (!itemHrid) {
+                return;
+            }
+
+            const viewActionBtn = this.createNavButton('View Action', () => {
+                navigateToItem(itemHrid);
+            });
+            actionMenu.appendChild(viewActionBtn);
+
+            const dictBtn = this.createNavButton('Item Dictionary', () => {
+                const game = getGameObject$1();
+                if (game?.handleOpenItemDictionary) {
+                    game.handleOpenItemDictionary(itemHrid);
+                }
+            });
+            actionMenu.appendChild(dictBtn);
+        }
+
+        /**
+         * Extract item HRID from a collection tile's SVG use href
+         * @param {Element} tile
+         * @returns {string|null}
+         */
+        extractHridFromTile(tile) {
+            const useEl = tile.querySelector('use');
+            if (!useEl) {
+                return null;
+            }
+
+            const href = useEl.getAttribute('href') || useEl.getAttribute('xlink:href');
+            if (!href) {
+                return null;
+            }
+
+            const name = href.split('#')[1];
+            if (!name) {
+                return null;
+            }
+
+            return `/items/${name}`;
+        }
+
+        /**
+         * Reverse-lookup item HRID from display name using dataManager
+         * @param {string} itemName
+         * @returns {string|null}
+         */
+        extractItemHridFromName(itemName) {
+            const initData = dataManager.getInitClientData();
+            if (!initData?.itemDetailMap) {
+                return null;
+            }
+
+            if (this.itemNameToHridCache && this.itemNameToHridCacheSource === initData.itemDetailMap) {
+                return this.itemNameToHridCache.get(itemName) || null;
+            }
+
+            const map = new Map();
+            for (const [hrid, item] of Object.entries(initData.itemDetailMap)) {
+                map.set(item.name, hrid);
+            }
+
+            if (map.size > 0) {
+                this.itemNameToHridCache = map;
+                this.itemNameToHridCacheSource = initData.itemDetailMap;
+            }
+
+            return map.get(itemName) || null;
+        }
+
+        /**
+         * Create a button styled to match the game's collection popover buttons
+         * @param {string} label
+         * @param {Function} onClick
+         * @returns {HTMLButtonElement}
+         */
+        createNavButton(label, onClick) {
+            const btn = document.createElement('button');
+            btn.className = 'Button_button__1Fe9z Button_fullWidth__17pVU';
+            btn.textContent = label;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                onClick();
+            });
+            return btn;
+        }
+    }
+
+    const collectionNavigation = new CollectionNavigation();
+
+    var collectionNavigation$1 = {
+        initialize: () => collectionNavigation.initialize(),
+        disable: () => collectionNavigation.disable(),
+    };
+
+    /**
+     * Chat Commands Module
+     * Adds /item, /wiki, and /market commands to in-game chat
+     * Port of MWI Game Commands by Mists, integrated into Toolasha architecture
+     */
+
+
+    class ChatCommands {
+        constructor() {
+            this.gameCore = null;
+            this.itemData = null;
+            this.chatInput = null;
+            this.boundKeydownHandler = null;
+            this.initialized = false;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize chat commands feature
+         */
+        async initialize() {
+            if (this.initialized) return;
+
+            const enabled = config.getSetting('chatCommands');
+            if (!enabled) return;
+
+            this.loadItemData();
+            this.setupGameCore();
+            await this.waitForChatInput();
+
+            if (this.chatInput) {
+                this.attachChatListener();
+                this.initialized = true;
+            }
+
+            // Listen for character switch to cleanup
+            dataManager.on('character_switching', () => {
+                this.cleanup();
+            });
+        }
+
+        /**
+         * Disable the feature and cleanup
+         */
+        disable() {
+            if (this.chatInput && this.boundKeydownHandler) {
+                this.chatInput.removeEventListener('keydown', this.boundKeydownHandler, true);
+                this.chatInput = null;
+                this.boundKeydownHandler = null;
+            }
+            this.initialized = false;
+        }
+
+        /**
+         * Cleanup when disabling or character switching
+         */
+        cleanup() {
+            this.disable();
+            this.timerRegistry.clearAll();
+        }
+
+        /**
+         * Load item data from dataManager
+         */
+        loadItemData() {
+            const initClientData = dataManager.getInitClientData();
+            if (!initClientData) {
+                console.warn('[Chat Commands] Failed to load item data');
+                return;
+            }
+
+            this.itemData = {
+                itemNameToHrid: {},
+                itemHridToName: {},
+            };
+
+            for (const [hrid, item] of Object.entries(initClientData.itemDetailMap)) {
+                if (item?.name) {
+                    const normalizedName = item.name.toLowerCase();
+                    this.itemData.itemNameToHrid[normalizedName] = hrid;
+                    this.itemData.itemHridToName[hrid] = item.name;
+                }
+            }
+        }
+
+        /**
+         * Setup game core access via React Fiber tree traversal
+         */
+        setupGameCore() {
+            try {
+                const rootEl = document.getElementById('root');
+                const rootFiber =
+                    rootEl?._reactRootContainer?.current || rootEl?._reactRootContainer?._internalRoot?.current;
+                if (!rootFiber) return;
+
+                function find(fiber) {
+                    if (!fiber) return null;
+                    if (fiber.stateNode?.sendPing) return fiber.stateNode;
+                    return find(fiber.child) || find(fiber.sibling);
+                }
+
+                this.gameCore = find(rootFiber);
+            } catch (error) {
+                console.error('[Chat Commands] Error accessing game core:', error);
+            }
+        }
+
+        /**
+         * Wait for chat input to be available
+         */
+        async waitForChatInput() {
+            for (let i = 0; i < 50; i++) {
+                const input = document.querySelector('[class*="Chat_chatInputContainer"] input');
+                if (input) {
+                    this.chatInput = input;
+                    return;
+                }
+                await new Promise((resolve) => {
+                    const timeout = setTimeout(resolve, 200);
+                    this.timerRegistry.registerTimeout(timeout);
+                });
+            }
+            console.warn('[Chat Commands] Chat input not found after 10 seconds');
+        }
+
+        /**
+         * Attach keydown listener to chat input
+         */
+        attachChatListener() {
+            if (!this.chatInput) return;
+
+            this.boundKeydownHandler = (event) => this.handleKeydown(event);
+            this.chatInput.addEventListener('keydown', this.boundKeydownHandler, true);
+        }
+
+        /**
+         * Handle keydown on chat input
+         * @param {KeyboardEvent} event - Keyboard event
+         */
+        handleKeydown(event) {
+            if (event.key !== 'Enter') return;
+
+            const command = this.parseCommand(event.target.value);
+            if (!command) return;
+
+            // Prevent chat submission
+            event.preventDefault();
+            event.stopPropagation();
+
+            // Execute command
+            this.executeCommand(command);
+
+            // Clear input
+            this.clearChatInput(event.target);
+        }
+
+        /**
+         * Parse command from chat input
+         * @param {string} inputValue - Chat input value
+         * @returns {Object|null} Command object or null if not a command
+         */
+        parseCommand(inputValue) {
+            const trimmed = inputValue.trim();
+            const lower = trimmed.toLowerCase();
+
+            if (lower.startsWith('/item ')) {
+                const itemName = trimmed.substring(6).trim();
+                if (!itemName) return null;
+                return { type: 'item', itemName };
+            }
+
+            if (lower.startsWith('/wiki ')) {
+                const itemName = trimmed.substring(6).trim();
+                if (!itemName) return null;
+                return { type: 'wiki', itemName };
+            }
+
+            if (lower.startsWith('/market ')) {
+                let itemName = trimmed.substring(8).trim();
+                if (!itemName) return null;
+                let enhancementLevel = 0;
+                const enhMatch = itemName.match(/\s*\+(\d+)$/);
+                if (enhMatch) {
+                    enhancementLevel = parseInt(enhMatch[1], 10);
+                    itemName = itemName.slice(0, -enhMatch[0].length).trim();
+                }
+                return { type: 'market', itemName, enhancementLevel };
+            }
+
+            return null;
+        }
+
+        /**
+         * Execute parsed command
+         * @param {Object} command - Command object {type, itemName}
+         */
+        executeCommand(command) {
+            const normalizedName = this.normalizeItemName(command.itemName);
+
+            // normalizedName is null when there are multiple matches (already shown to user)
+            if (!normalizedName) return;
+
+            const lowerName = normalizedName.replace(/_/g, ' ').toLowerCase();
+            const itemHrid = this.itemData?.itemNameToHrid[lowerName];
+
+            switch (command.type) {
+                case 'item':
+                    if (itemHrid) {
+                        this.openItemDictionary(itemHrid);
+                    } else {
+                        // Item not found in game data (best effort normalization was used)
+                        this.showError(`Item "${command.itemName}" not found in game data`);
+                    }
+                    break;
+
+                case 'wiki':
+                    // Wiki always works (uses best effort normalization if no match)
+                    window.open(`https://milkywayidle.wiki.gg/wiki/${normalizedName}`, '_blank');
+                    break;
+
+                case 'market':
+                    if (itemHrid) {
+                        this.openMarketplace(itemHrid, command.enhancementLevel ?? 0);
+                    } else {
+                        // Item not found in game data (best effort normalization was used)
+                        this.showError(`Item "${command.itemName}" not found in game data`);
+                    }
+                    break;
+            }
+        }
+
+        /**
+         * Normalize item name with fuzzy matching
+         * @param {string} itemName - Raw item name from user
+         * @returns {string|null} Normalized name for URL/HRID lookup, or null if multiple matches
+         */
+        normalizeItemName(itemName) {
+            if (!this.itemData) {
+                return null;
+            }
+
+            const lowerName = itemName.toLowerCase();
+
+            // Try exact match first
+            if (this.itemData.itemNameToHrid[lowerName]) {
+                const hrid = this.itemData.itemNameToHrid[lowerName];
+                return this.itemData.itemHridToName[hrid].replace(/ /g, '_');
+            }
+
+            // Try fuzzy match
+            const allNames = Object.keys(this.itemData.itemNameToHrid);
+            const matches = allNames.filter((name) => name.includes(lowerName));
+
+            if (matches.length === 1) {
+                // Single match found
+                const hrid = this.itemData.itemNameToHrid[matches[0]];
+                return this.itemData.itemHridToName[hrid].replace(/ /g, '_');
+            }
+
+            if (matches.length > 1) {
+                // Multiple matches - show user
+                this.showMultipleMatches(matches);
+                return null;
+            }
+
+            // No matches - do best effort normalization for wiki
+            return itemName
+                .split(' ')
+                .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+                .join('_');
+        }
+
+        /**
+         * Show multiple match warning in chat
+         * @param {Array<string>} matches - Array of matching item names (lowercase keys)
+         */
+        showMultipleMatches(matches) {
+            // Find all chat history elements
+            const allChatHistories = document.querySelectorAll('[class*="ChatHistory_chatHistory"]');
+
+            // Find the visible one by checking if the grandparent TabPanel is not hidden
+            let chatHistory = null;
+            for (const history of allChatHistories) {
+                const grandparent = history.parentElement?.parentElement;
+                if (grandparent && !grandparent.classList.contains('TabPanel_hidden__26UM3')) {
+                    chatHistory = history;
+                    break;
+                }
+            }
+
+            if (!chatHistory) {
+                console.warn('[Chat Commands] No visible chat history found');
+                return;
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.style.cssText = `
+            padding: 8px;
+            margin: 4px 0;
+            background: rgba(255, 100, 100, 0.2);
+            border-left: 3px solid #ff6464;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #ffcccc;
+        `;
+
+            // Convert lowercase keys to proper item names
+            const properNames = matches.map((lowerName) => {
+                const hrid = this.itemData.itemNameToHrid[lowerName];
+                return this.itemData.itemHridToName[hrid];
+            });
+
+            const matchList = properNames.slice(0, 5).join(', ') + (properNames.length > 5 ? '...' : '');
+            messageDiv.textContent = `Multiple items match: ${matchList}. Please be more specific.`;
+
+            chatHistory.appendChild(messageDiv);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
+
+        /**
+         * Show error message in chat
+         * @param {string} message - Error message to display
+         */
+        showError(message) {
+            // Find all chat history elements
+            const allChatHistories = document.querySelectorAll('[class*="ChatHistory_chatHistory"]');
+
+            // Find the visible one by checking if the grandparent TabPanel is not hidden
+            let chatHistory = null;
+            for (const history of allChatHistories) {
+                const grandparent = history.parentElement?.parentElement;
+                if (grandparent && !grandparent.classList.contains('TabPanel_hidden__26UM3')) {
+                    chatHistory = history;
+                    break;
+                }
+            }
+
+            if (!chatHistory) {
+                console.warn('[Chat Commands] No visible chat history found');
+                return;
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.style.cssText = `
+            padding: 8px;
+            margin: 4px 0;
+            background: rgba(255, 100, 100, 0.2);
+            border-left: 3px solid #ff6464;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #ffcccc;
+        `;
+
+            messageDiv.textContent = message;
+
+            chatHistory.appendChild(messageDiv);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
+
+        /**
+         * Open Item Dictionary for specific item
+         * @param {string} itemHrid - Item HRID (e.g., "/items/radiant_fiber")
+         */
+        openItemDictionary(itemHrid) {
+            if (!this.gameCore?.handleOpenItemDictionary) {
+                this.showError('Feature unavailable after 2/21/26 game update');
+                return;
+            }
+
+            try {
+                this.gameCore.handleOpenItemDictionary(itemHrid);
+            } catch (error) {
+                console.error('[Chat Commands] Failed to open Item Dictionary:', error);
+                this.showError('Failed to open Item Dictionary');
+            }
+        }
+
+        /**
+         * Open marketplace for specific item
+         * @param {string} itemHrid - Item HRID (e.g., "/items/radiant_fiber")
+         * @param {number} enhancementLevel - Enhancement level (default 0)
+         */
+        openMarketplace(itemHrid, enhancementLevel = 0) {
+            if (!this.gameCore?.handleGoToMarketplace) {
+                this.showError('Feature unavailable after 2/21/26 game update');
+                return;
+            }
+
+            try {
+                this.gameCore.handleGoToMarketplace(itemHrid, enhancementLevel);
+            } catch (error) {
+                console.error('[Chat Commands] Failed to open marketplace:', error);
+                this.showError('Failed to open marketplace');
+            }
+        }
+
+        /**
+         * Clear chat input using React-compatible method
+         * @param {HTMLInputElement} inputElement - Chat input element
+         */
+        clearChatInput(inputElement) {
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+
+            nativeInputValueSetter.call(inputElement, '');
+            inputElement.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }
+
+    // Export as feature module
+    var chatCommands = {
+        name: 'Chat Commands',
+        initialize: async () => {
+            const chatCommands = new ChatCommands();
+            await chatCommands.initialize();
+            return chatCommands;
+        },
+        cleanup: (instance) => {
+            if (instance) {
+                instance.cleanup();
+            }
+        },
+    };
+
+    /**
+     * Mention Popup
+     * Draggable popup showing all @mention messages for a chat channel
+     */
+
+
+    class MentionPopup {
+        constructor() {
+            this.container = null;
+            this.currentChannel = null;
+            this.onCloseFn = null;
+
+            // Dragging state
+            this.isDragging = false;
+            this.dragOffset = { x: 0, y: 0 };
+            this.dragMoveHandler = null;
+            this.dragUpHandler = null;
+
+            // Click-outside handler
+            this.clickOutsideHandler = null;
+        }
+
+        /**
+         * Format a UTC ISO timestamp string using the user's market date/time settings
+         * @param {string} isoString - ISO 8601 timestamp (e.g. "2026-02-24T16:59:59.046Z")
+         * @returns {string} Formatted date/time string
+         */
+        formatTimestamp(isoString) {
+            if (!isoString) return '';
+
+            const timeFormat = config.getSettingValue('market_listingTimeFormat', '24hour');
+            const dateFormat = config.getSettingValue('market_listingDateFormat', 'MM-DD');
+            const use12Hour = timeFormat === '12hour';
+
+            const date = new Date(isoString);
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const datePart = dateFormat === 'DD-MM' ? `${day}-${month}` : `${month}-${day}`;
+
+            const timePart = date
+                .toLocaleString('en-US', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: use12Hour,
+                })
+                .trim();
+
+            return `${datePart} ${timePart}`;
+        }
+
+        /**
+         * Open (or replace) the popup for a given channel
+         * @param {string} channel - Channel HRID
+         * @param {Array<{sName: string, m: string, t: string}>} mentions - Mention list
+         * @param {string} channelDisplayName - Human-readable channel name
+         * @param {Function} onClose - Callback when popup is closed (to clear mentions)
+         */
+        open(channel, mentions, channelDisplayName, onClose) {
+            this.currentChannel = channel;
+            this.onCloseFn = onClose;
+
+            if (this.container) {
+                // Already open — replace content for new channel
+                this._updateContent(mentions, channelDisplayName);
+                return;
+            }
+
+            this._build(mentions, channelDisplayName);
+        }
+
+        /**
+         * Close the popup and invoke the onClose callback
+         */
+        close() {
+            if (this.onCloseFn) {
+                this.onCloseFn();
+                this.onCloseFn = null;
+            }
+
+            this._teardown();
+        }
+
+        /**
+         * Build and insert the popup DOM
+         * @param {Array} mentions
+         * @param {string} channelDisplayName
+         */
+        _build(mentions, channelDisplayName) {
+            this.container = document.createElement('div');
+            this.container.id = 'mwi-mention-popup';
+            this.container.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 9999;
+            min-width: 420px;
+            max-width: 600px;
+            background: rgba(0, 0, 0, 0.92);
+            border: 2px solid ${config.COLOR_ACCENT};
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.7);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            user-select: none;
+        `;
+
+            // Header
+            const header = document.createElement('div');
+            header.id = 'mwi-mention-popup-header';
+            header.style.cssText = `
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            cursor: grab;
+            border-radius: 6px 6px 0 0;
+            background: rgba(255,255,255,0.05);
+        `;
+
+            const title = document.createElement('span');
+            title.id = 'mwi-mention-popup-title';
+            title.style.cssText = `
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: ${config.COLOR_ACCENT};
+        `;
+            title.textContent = `Mentions — ${channelDisplayName}`;
+
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = '×';
+            closeBtn.style.cssText = `
+            background: none;
+            border: none;
+            color: #aaa;
+            font-size: 1.2rem;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0 2px;
+        `;
+            closeBtn.addEventListener('mouseenter', () => (closeBtn.style.color = '#fff'));
+            closeBtn.addEventListener('mouseleave', () => (closeBtn.style.color = '#aaa'));
+            closeBtn.addEventListener('click', () => this.close());
+
+            header.appendChild(title);
+            header.appendChild(closeBtn);
+
+            // Body
+            const body = document.createElement('div');
+            body.id = 'mwi-mention-popup-body';
+            body.style.cssText = `
+            max-height: 400px;
+            overflow-y: auto;
+            padding: 8px 0;
+        `;
+
+            this._renderMentions(body, mentions);
+
+            this.container.appendChild(header);
+            this.container.appendChild(body);
+            document.body.appendChild(this.container);
+
+            this._setupDragging(header);
+            this._setupClickOutside();
+        }
+
+        /**
+         * Update title and body content without rebuilding the whole popup
+         * @param {Array} mentions
+         * @param {string} channelDisplayName
+         */
+        _updateContent(mentions, channelDisplayName) {
+            const title = this.container.querySelector('#mwi-mention-popup-title');
+            if (title) title.textContent = `Mentions — ${channelDisplayName}`;
+
+            const body = this.container.querySelector('#mwi-mention-popup-body');
+            if (body) {
+                body.innerHTML = '';
+                this._renderMentions(body, mentions);
+            }
+        }
+
+        /**
+         * Render mention rows into the body element
+         * @param {HTMLElement} body
+         * @param {Array<{sName: string, m: string, t: string}>} mentions
+         */
+        _renderMentions(body, mentions) {
+            if (!mentions || mentions.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = `
+                padding: 16px 14px;
+                color: #888;
+                font-size: 0.85rem;
+                text-align: center;
+            `;
+                empty.textContent = 'No mentions';
+                body.appendChild(empty);
+                return;
+            }
+
+            for (const mention of mentions) {
+                const row = document.createElement('div');
+                row.style.cssText = `
+                padding: 7px 14px;
+                border-bottom: 1px solid rgba(255,255,255,0.06);
+                font-size: 0.85rem;
+                line-height: 1.4;
+                user-select: text;
+            `;
+                row.style.cursor = 'default';
+
+                const timestamp = document.createElement('span');
+                timestamp.style.cssText = `
+                color: #888;
+                font-size: 0.78rem;
+                margin-right: 8px;
+                white-space: nowrap;
+            `;
+                timestamp.textContent = this.formatTimestamp(mention.t);
+
+                const sender = document.createElement('span');
+                sender.style.cssText = `
+                color: ${config.COLOR_ACCENT};
+                font-weight: 600;
+                margin-right: 6px;
+            `;
+                sender.textContent = mention.sName;
+
+                const msg = document.createElement('span');
+                msg.style.cssText = `color: #e7e7e7;`;
+                msg.textContent = mention.m;
+
+                row.appendChild(timestamp);
+                row.appendChild(sender);
+                row.appendChild(msg);
+                body.appendChild(row);
+            }
+        }
+
+        /**
+         * Close the popup when clicking outside of it
+         */
+        _setupClickOutside() {
+            this.clickOutsideHandler = (e) => {
+                if (this.container && !this.container.contains(e.target)) {
+                    this.close();
+                }
+            };
+            // Use mousedown so it fires before any other click handlers
+            document.addEventListener('mousedown', this.clickOutsideHandler);
+        }
+
+        /**
+         * Set up drag behaviour on the header element
+         * @param {HTMLElement} header
+         */
+        _setupDragging(header) {
+            header.addEventListener('mousedown', (e) => {
+                if (e.target.tagName === 'BUTTON') return;
+                this.isDragging = true;
+
+                // Switch from transform-based centering to explicit coordinates
+                const rect = this.container.getBoundingClientRect();
+                this.container.style.transform = 'none';
+                this.container.style.top = `${rect.top}px`;
+                this.container.style.left = `${rect.left}px`;
+
+                this.dragOffset = {
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top,
+                };
+                header.style.cursor = 'grabbing';
+                e.preventDefault();
+            });
+
+            this.dragMoveHandler = (e) => {
+                if (!this.isDragging) return;
+
+                let x = e.clientX - this.dragOffset.x;
+                let y = e.clientY - this.dragOffset.y;
+
+                const minVisible = 80;
+                y = Math.max(0, Math.min(y, window.innerHeight - minVisible));
+                x = Math.max(-this.container.offsetWidth + minVisible, Math.min(x, window.innerWidth - minVisible));
+
+                this.container.style.top = `${y}px`;
+                this.container.style.left = `${x}px`;
+            };
+
+            this.dragUpHandler = () => {
+                if (!this.isDragging) return;
+                this.isDragging = false;
+                header.style.cursor = 'grab';
+            };
+
+            document.addEventListener('mousemove', this.dragMoveHandler);
+            document.addEventListener('mouseup', this.dragUpHandler);
+        }
+
+        /**
+         * Remove popup from DOM and clean up event listeners
+         */
+        _teardown() {
+            if (this.dragMoveHandler) {
+                document.removeEventListener('mousemove', this.dragMoveHandler);
+                this.dragMoveHandler = null;
+            }
+            if (this.dragUpHandler) {
+                document.removeEventListener('mouseup', this.dragUpHandler);
+                this.dragUpHandler = null;
+            }
+            if (this.clickOutsideHandler) {
+                document.removeEventListener('mousedown', this.clickOutsideHandler);
+                this.clickOutsideHandler = null;
+            }
+
+            if (this.container) {
+                this.container.remove();
+                this.container = null;
+            }
+
+            this.currentChannel = null;
+            this.isDragging = false;
+        }
+    }
+
+    const mentionPopup = new MentionPopup();
+
+    /**
+     * Mention Tracker
+     * Tracks @mentions across all chat channels and displays badge counts on chat tabs
+     */
+
+
+    class MentionTracker {
+        constructor() {
+            this.initialized = false;
+            this.mentionLog = new Map(); // channel -> Array<{ sName, m, t }>
+            this.characterName = null;
+            this.handlers = {};
+            this.unregisterObserver = null;
+        }
+
+        /**
+         * Initialize the mention tracker
+         */
+        async initialize() {
+            if (this.initialized) return;
+
+            if (!config.getSetting('chat_mentionTracker')) {
+                return;
+            }
+
+            this.initialized = true;
+
+            // Get character name
+            this.characterName = dataManager.getCurrentCharacterName();
+            if (!this.characterName) {
+                return;
+            }
+
+            // Listen for chat messages
+            this.handlers.chatMessage = (data) => this.onChatMessage(data);
+            webSocketHook.on('chat_message_received', this.handlers.chatMessage);
+
+            // Observe chat tabs to inject badges and add click handlers
+            this.unregisterObserver = domObserver.onClass(
+                'MentionTracker',
+                'Chat_tabsComponentContainer',
+                (tabsContainer) => {
+                    this.setupTabBadges(tabsContainer);
+                }
+            );
+
+            // Check for existing tabs
+            const existingTabs = document.querySelector('.Chat_tabsComponentContainer__3ZoKe');
+            if (existingTabs) {
+                this.setupTabBadges(existingTabs);
+            }
+        }
+
+        /**
+         * Handle incoming chat message
+         * @param {Object} data - WebSocket message data
+         */
+        onChatMessage(data) {
+            const message = data.message;
+            if (!message) return;
+
+            // Skip system messages
+            if (message.isSystemMessage || !message.sName) return;
+
+            const text = message.m || '';
+            const channel = message.chan || '';
+
+            if (this.isMentioned(text)) {
+                const log = this.mentionLog.get(channel) || [];
+                log.push({ sName: message.sName, m: text, t: message.t });
+                this.mentionLog.set(channel, log);
+                this.updateBadge(channel);
+            }
+        }
+
+        /**
+         * Check if the message mentions the current player
+         * @param {string} text - Message text
+         * @returns {boolean} True if mentioned
+         */
+        isMentioned(text) {
+            if (!text || !this.characterName) return false;
+
+            // Check for @CharacterName (case insensitive)
+            const escapedName = this.escapeRegex(this.characterName);
+            const mentionPattern = new RegExp(`@${escapedName}\\b`, 'i');
+            return mentionPattern.test(text);
+        }
+
+        /**
+         * Escape special regex characters
+         * @param {string} str - String to escape
+         * @returns {string} Escaped string
+         */
+        escapeRegex(str) {
+            return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        /**
+         * Get display name for a channel
+         * @param {string} channel - Channel HRID
+         * @returns {string} Display name
+         */
+        getChannelDisplayName(channel) {
+            const channelMap = {
+                '/chat_channel_types/party': 'Party',
+                '/chat_channel_types/guild': 'Guild',
+                '/chat_channel_types/local': 'Local',
+                '/chat_channel_types/whisper': 'Whisper',
+                '/chat_channel_types/global': 'Global',
+            };
+            return channelMap[channel] || channel;
+        }
+
+        /**
+         * Setup badges and click handlers on chat tabs
+         * @param {HTMLElement} tabsContainer - The tabs container element
+         */
+        setupTabBadges(tabsContainer) {
+            const tabButtons = tabsContainer.querySelectorAll('.MuiButtonBase-root');
+
+            for (const button of tabButtons) {
+                const tabName = button.textContent?.trim();
+                if (!tabName) continue;
+
+                // Find matching channel for this tab
+                const channel = this.getChannelFromTabName(tabName);
+                if (!channel) continue;
+
+                // Store reference to button for this channel
+                button.dataset.mentionChannel = channel;
+
+                // Ensure button has relative positioning for badge
+                if (getComputedStyle(button).position === 'static') {
+                    button.style.position = 'relative';
+                }
+
+                // Clicking the tab itself clears the mention badge for that channel
+                if (!button.dataset.mentionClickBound) {
+                    button.dataset.mentionClickBound = '1';
+                    button.addEventListener('click', () => {
+                        this.clearMentions(channel);
+                    });
+                }
+
+                // Update badge for this channel
+                this.updateBadgeForButton(button, channel);
+            }
+        }
+
+        /**
+         * Get channel HRID from tab display name
+         * @param {string} tabName - Tab display name (may have number suffix like "General2")
+         * @returns {string|null} Channel HRID
+         */
+        getChannelFromTabName(tabName) {
+            // Strip trailing numbers (unread counts) from tab name
+            const cleanName = tabName.replace(/\d+$/, '');
+
+            const nameMap = {
+                Party: '/chat_channel_types/party',
+                Guild: '/chat_channel_types/guild',
+                Local: '/chat_channel_types/local',
+                Whisper: '/chat_channel_types/whisper',
+                Global: '/chat_channel_types/global',
+                General: '/chat_channel_types/general',
+                Trade: '/chat_channel_types/trade',
+                Beginner: '/chat_channel_types/beginner',
+                Recruit: '/chat_channel_types/recruit',
+                Ironcow: '/chat_channel_types/ironcow',
+                Mod: '/chat_channel_types/mod',
+            };
+            return nameMap[cleanName] || null;
+        }
+
+        /**
+         * Update badge display for a channel
+         * @param {string} channel - Channel HRID
+         */
+        updateBadge(channel) {
+            const selector = `.Chat_tabsComponentContainer__3ZoKe .MuiButtonBase-root[data-mention-channel="${channel}"]`;
+            const button = document.querySelector(selector);
+
+            if (button) {
+                this.updateBadgeForButton(button, channel);
+            }
+        }
+
+        /**
+         * Update badge on a specific button
+         * @param {HTMLElement} button - Tab button element
+         * @param {string} channel - Channel HRID
+         */
+        updateBadgeForButton(button, channel) {
+            const count = (this.mentionLog.get(channel) || []).length;
+
+            // Find the MuiBadge-root wrapper inside the button (where game puts its badge)
+            const badgeRoot = button.querySelector('.MuiBadge-root');
+            const container = badgeRoot || button;
+
+            // Find or create badge
+            let badge = container.querySelector('.mwi-mention-badge');
+
+            if (count === 0) {
+                if (badge) {
+                    badge.remove();
+                }
+                return;
+            }
+
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'mwi-mention-badge';
+                badge.style.cssText = `
+                position: absolute;
+                top: 0;
+                left: 0;
+                transform: translate(-6px, -6px);
+                min-width: 12px;
+                height: 12px;
+                padding: 0 3px;
+                border-radius: 6px;
+                font-family: Roboto, Helvetica, Arial, sans-serif;
+                font-size: 9px;
+                font-weight: 500;
+                line-height: 12px;
+                text-align: center;
+                box-sizing: border-box;
+                z-index: 1;
+                background-color: #d32f2f;
+                color: #e7e7e7;
+                cursor: pointer;
+            `;
+                badge.addEventListener('click', (e) => {
+                    e.stopPropagation(); // Prevent tab switch
+                    const mentions = this.mentionLog.get(channel) || [];
+                    const displayName = this.getChannelDisplayName(channel);
+                    mentionPopup.open(channel, mentions, displayName, () => this.clearMentions(channel));
+                });
+                container.appendChild(badge);
+            }
+
+            // Update count display
+            badge.textContent = count > 99 ? '99+' : count.toString();
+        }
+
+        /**
+         * Clear mention count for a channel
+         * @param {string} channel - Channel HRID
+         */
+        clearMentions(channel) {
+            if (this.mentionLog.has(channel)) {
+                this.mentionLog.set(channel, []);
+                this.updateBadge(channel);
+            }
+        }
+
+        /**
+         * Cleanup the mention tracker
+         */
+        disable() {
+            if (this.handlers.chatMessage) {
+                webSocketHook.off('chat_message_received', this.handlers.chatMessage);
+                this.handlers.chatMessage = null;
+            }
+
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            // Close popup if open
+            mentionPopup.close();
+
+            // Remove all badges
+            document.querySelectorAll('.mwi-mention-badge').forEach((el) => el.remove());
+
+            // Clear log
+            this.mentionLog.clear();
+
+            this.initialized = false;
+        }
+    }
+
+    const mentionTracker = new MentionTracker();
+
+    /**
+     * Chat Block List
+     * Maintains an in-memory set of blocked player names sourced from the game's
+     * blockedCharacterMap, kept current via init_character_data and
+     * character_blocks_updated WebSocket events.
+     *
+     * Used by pop-out-chat.js to filter blocked messages before buffering or relay.
+     */
+
+
+    class ChatBlockList {
+        constructor() {
+            this.isInitialized = false;
+            this.blockedNames = new Set();
+            this.handlers = {
+                initCharacterData: (data) => this._syncFromMap(data?.blockedCharacterMap),
+                blocksUpdated: (data) => this._syncFromMap(data?.blockedCharacterMap),
+            };
+        }
+
+        /**
+         * Initialize the block list — seed from current character data, then register WS listeners.
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Seed from already-received init_character_data (the WS event fires before features initialize)
+            this._syncFromMap(dataManager.getBlockedCharacterMap());
+
+            webSocketHook.on('init_character_data', this.handlers.initCharacterData);
+            webSocketHook.on('character_blocks_updated', this.handlers.blocksUpdated);
+        }
+
+        /**
+         * Disable the block list — unregister WS listeners and clear state.
+         */
+        disable() {
+            webSocketHook.off('init_character_data', this.handlers.initCharacterData);
+            webSocketHook.off('character_blocks_updated', this.handlers.blocksUpdated);
+
+            this.blockedNames.clear();
+            this.isInitialized = false;
+        }
+
+        /**
+         * Check if a player name is blocked.
+         * @param {string} name - Player name to check
+         * @returns {boolean}
+         */
+        isBlocked(name) {
+            if (!name) {
+                return false;
+            }
+
+            return this.blockedNames.has(name.toLowerCase());
+        }
+
+        /**
+         * Replace the in-memory blocked names set from a blockedCharacterMap object.
+         * @param {Object|null|undefined} map - { [characterId]: name } map from WS
+         * @private
+         */
+        _syncFromMap(map) {
+            this.blockedNames = new Set(Object.values(map || {}).map((n) => n.toLowerCase()));
+        }
+    }
+
+    const chatBlockList = new ChatBlockList();
+
+    var chatBlockList$1 = {
+        name: 'Chat Block List',
+        initialize: () => chatBlockList.initialize(),
+        cleanup: () => chatBlockList.disable(),
+    };
+
+    /**
+     * Pop-Out Chat Window
+     * Opens game chat in a separate browser window with multi-channel split-pane support.
+     * Game tab relays WebSocket messages via BroadcastChannel; pop-out is a pure UI shell.
+     */
+
+
+    const RELAY_CHANNEL = 'mwi-chat-relay';
+    const SEND_CHANNEL = 'mwi-chat-send';
+    const MAX_BUFFER = 500;
+    const PING_INTERVAL_MS = 10_000;
+
+    const CHANNELS = [
+        { hrid: '/chat_channel_types/general', name: 'General' },
+        { hrid: '/chat_channel_types/trade', name: 'Trade' },
+        { hrid: '/chat_channel_types/global', name: 'Global' },
+        { hrid: '/chat_channel_types/local', name: 'Local' },
+        { hrid: '/chat_channel_types/party', name: 'Party' },
+        { hrid: '/chat_channel_types/guild', name: 'Guild' },
+        { hrid: '/chat_channel_types/whisper', name: 'Whisper' },
+        { hrid: '/chat_channel_types/beginner', name: 'Beginner' },
+        { hrid: '/chat_channel_types/recruit', name: 'Recruit' },
+        { hrid: '/chat_channel_types/ironcow', name: 'Ironcow' },
+    ];
+
+    const CHANNEL_NAME_MAP = Object.fromEntries(CHANNELS.map((c) => [c.hrid, c.name]));
+
+    const SKILL_HRID_TO_NAME = {
+        '/skills/total_level': 'Total Level',
+        '/skills/milking': 'Milking',
+        '/skills/foraging': 'Foraging',
+        '/skills/woodcutting': 'Woodcutting',
+        '/skills/cheesesmithing': 'Cheesesmithing',
+        '/skills/crafting': 'Crafting',
+        '/skills/tailoring': 'Tailoring',
+        '/skills/cooking': 'Cooking',
+        '/skills/brewing': 'Brewing',
+        '/skills/alchemy': 'Alchemy',
+        '/skills/enhancing': 'Enhancing',
+        '/skills/stamina': 'Stamina',
+        '/skills/intelligence': 'Intelligence',
+        '/skills/attack': 'Attack',
+        '/skills/melee': 'Melee',
+        '/skills/defense': 'Defense',
+        '/skills/ranged': 'Ranged',
+        '/skills/magic': 'Magic',
+    };
+
+    /**
+     * Resolve a system message with systemMetadata into a human-readable string.
+     * @param {string} messageKey - e.g. "systemChatMessage.characterLeveledUp"
+     * @param {Object} meta - Parsed systemMetadata
+     * @returns {string|null} Rendered string, or null if unrecognized
+     */
+    function resolveSystemMessage(messageKey, meta) {
+        if (messageKey === 'systemChatMessage.characterLeveledUp') {
+            const skillName = SKILL_HRID_TO_NAME[meta.skillHrid] || meta.skillHrid.split('/').pop().replace(/_/g, ' ');
+            return `🎉 ${meta.name} reached ${skillName} ${meta.level}!`;
+        }
+        return null;
+    }
+
+    /**
+     * Resolve a single linksMetadata link entry to a display string.
+     * @param {Object} link
+     * @returns {string}
+     */
+    function resolveLink(link) {
+        if (link.linkType === '/chat_link_types/market_listing') {
+            const itemDetails = dataManager.getItemDetails(link.itemHrid);
+            const itemName = itemDetails?.name || link.itemHrid.split('/').pop().replace(/_/g, ' ');
+            const enhancement = link.itemEnhancementLevel > 0 ? ` +${link.itemEnhancementLevel}` : '';
+            const count = link.itemCount > 1 ? ` ×${link.itemCount}` : '';
+            const price = formatters_js.formatKMB(link.price);
+            const side = link.isSell ? 'Sell' : 'Buy';
+            return `[${itemName}${enhancement}${count} @ ${price} ${side}]`;
+        }
+        if (link.linkType === '/chat_link_types/item') {
+            const itemDetails = dataManager.getItemDetails(link.itemHrid);
+            const itemName = itemDetails?.name || link.itemHrid.split('/').pop().replace(/_/g, ' ');
+            const enhancement = link.itemEnhancementLevel > 0 ? ` +${link.itemEnhancementLevel}` : '';
+            const count = link.itemCount > 1 ? ` ×${link.itemCount}` : '';
+            return `[${itemName}${enhancement}${count}]`;
+        }
+        if (link.linkType === '/chat_link_types/ability') {
+            const abilityDetails = dataManager.getInitClientData()?.abilityDetailMap?.[link.abilityHrid];
+            const abilityName = abilityDetails?.name || link.abilityHrid.split('/').pop().replace(/_/g, ' ');
+            return `[${abilityName} Lv.${link.abilityLevel}]`;
+        }
+        if (link.linkType === '/chat_link_types/skill') {
+            const skillName = SKILL_HRID_TO_NAME[link.skillHrid] || link.skillHrid.split('/').pop().replace(/_/g, ' ');
+            return `[${skillName} Lv.${link.skillLevel}]`;
+        }
+        if (link.linkType === '/chat_link_types/party') {
+            const actionDetails = dataManager.getActionDetails(link.partyActionHrid);
+            const zoneName = actionDetails?.name || link.partyActionHrid.split('/').pop().replace(/_/g, ' ');
+            const tier = ` T${link.partyDifficultyTier ?? 0}`;
+            return `[Party: ${zoneName}${tier}]`;
+        }
+        if (link.linkType === '/chat_link_types/collection') {
+            const itemDetails = dataManager.getItemDetails(link.itemHrid);
+            const itemName = itemDetails?.name || link.itemHrid.split('/').pop().replace(/_/g, ' ');
+            return `[Collection: ${itemName} ×${formatters_js.formatKMB(link.itemCount)}]`;
+        }
+        if (link.linkType === '/chat_link_types/bestiary') {
+            const monsterDetails = dataManager.getInitClientData()?.combatMonsterDetailMap?.[link.monsterHrid];
+            const monsterName = monsterDetails?.name || link.monsterHrid.split('/').pop().replace(/_/g, ' ');
+            return `[Bestiary: ${monsterName} ×${link.monsterCount}]`;
+        }
+        // Fallback: humanize the HRID
+        return `[${link.linkType.split('/').pop().replace(/_/g, ' ')}]`;
+    }
+
+    /**
+     * Resolve a raw WebSocket message into a serializable relay object.
+     * @param {Object} message - Raw message from chat_message_received
+     * @returns {Object}
+     */
+    function resolveMessage(message) {
+        let renderedLinks = [];
+        if (message.linksMetadata) {
+            try {
+                const links = JSON.parse(message.linksMetadata);
+                renderedLinks = links.map(resolveLink);
+            } catch {
+                // ignore malformed linksMetadata
+            }
+        }
+
+        let resolvedText = message.m || '';
+        if (message.isSystemMessage && message.systemMetadata) {
+            try {
+                const meta = JSON.parse(message.systemMetadata);
+                const rendered = resolveSystemMessage(message.m || '', meta);
+                if (rendered !== null) {
+                    resolvedText = rendered;
+                }
+            } catch {
+                // ignore malformed systemMetadata
+            }
+        }
+
+        return {
+            type: 'chat_message',
+            channel: message.chan || '',
+            sName: message.sName || '',
+            m: resolvedText,
+            t: message.t || '',
+            isSystem: !!message.isSystemMessage,
+            renderedLinks,
+        };
+    }
+
+    class PopOutChat {
+        constructor() {
+            this.relayChannel = null;
+            this.sendChannel = null;
+            this.popoutWindow = null;
+            this.messageBuffer = new Map(); // hrid → Array<resolved message>
+            this.discoveredChannels = new Map(); // hrid → {hrid, name} for channels seen via messages but not in DOM
+            this.wsHandler = null;
+            this.initialized = false;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.unregisterObserver = null;
+            this.popoutBtn = null;
+        }
+
+        /**
+         * Initialize the pop-out chat feature.
+         */
+        async initialize() {
+            if (this.initialized) return;
+            if (!config.getSetting('chat_popOut')) return;
+
+            this.initialized = true;
+
+            // Set up BroadcastChannels
+            this.relayChannel = new BroadcastChannel(RELAY_CHANNEL);
+            this.sendChannel = new BroadcastChannel(SEND_CHANNEL);
+
+            // Listen for messages from pop-out
+            this.sendChannel.onmessage = ({ data }) => this._onSendChannelMessage(data);
+
+            // Listen for incoming chat messages from WebSocket
+            this.wsHandler = (data) => this._onChatMessage(data);
+            webSocketHook.on('chat_message_received', this.wsHandler);
+
+            // Start keepalive ping
+            const pingTimer = setInterval(() => {
+                this.relayChannel?.postMessage({ type: 'ping' });
+            }, PING_INTERVAL_MS);
+            this.timerRegistry.registerInterval(pingTimer);
+
+            // Inject pop-out button next to the ▼ collapse button in the chat tabs row
+            this.unregisterObserver = domObserver.onClass('PopOutChat', 'Chat_tabsComponentContainer', (container) => {
+                const parent = container.parentElement;
+                if (parent) this._injectButton(parent);
+            });
+
+            // Handle existing container
+            const existing = document.querySelector('[class*="Chat_tabsComponentContainer"]');
+            if (existing?.parentElement) this._injectButton(existing.parentElement);
+        }
+
+        /**
+         * Inject the pop-out button next to the overflow arrow in the chat tabs row.
+         * @param {HTMLElement} container - parent of Chat_tabsComponentContainer
+         */
+        _injectButton(container) {
+            if (container.querySelector('[data-mwi-popout-chat]')) return;
+
+            const btn = document.createElement('button');
+            btn.setAttribute('data-mwi-popout-chat', 'true');
+            btn.textContent = '⧉';
+            btn.title = 'Pop out chat';
+            btn.style.cssText = `
+            padding: 2px 6px;
+            font-size: 13px;
+            background: none;
+            color: #8b949e;
+            border: none;
+            cursor: pointer;
+            user-select: none;
+            flex-shrink: 0;
+            line-height: 1;
+            opacity: 0.75;
+        `;
+            btn.addEventListener('mouseenter', () => (btn.style.opacity = '1'));
+            btn.addEventListener('mouseleave', () => (btn.style.opacity = '0.75'));
+            btn.addEventListener('click', () => this._openPopout());
+
+            // Insert into the same parent as the expandCollapseButton, after it
+            const collapseBtn = container.querySelector('[class*="TabsComponent_expandCollapseButton"]');
+            if (collapseBtn?.parentElement) {
+                collapseBtn.parentElement.insertBefore(btn, collapseBtn.nextSibling);
+            } else {
+                // Fallback: append to the tabsComponentContainer
+                const tabsContainer = container.querySelector('[class*="Chat_tabsComponentContainer"]') || container;
+                tabsContainer.appendChild(btn);
+            }
+
+            this.popoutBtn = btn;
+        }
+
+        /**
+         * Handle an incoming chat_message_received WebSocket event.
+         * @param {Object} data
+         */
+        _onChatMessage(data) {
+            const message = data?.message;
+            if (!message || !message.chan) return;
+
+            const resolved = resolveMessage(message);
+
+            // Drop messages from blocked players
+            if (!resolved.isSystem && chatBlockList.isBlocked(resolved.sName)) {
+                return;
+            }
+
+            // Track channels seen via messages that aren't in the hardcoded list
+            if (!CHANNELS.some((c) => c.hrid === resolved.channel) && !this.discoveredChannels.has(resolved.channel)) {
+                const name = resolved.channel
+                    .split('/')
+                    .pop()
+                    .replace(/_/g, ' ')
+                    .replace(/\b\w/g, (c) => c.toUpperCase());
+                this.discoveredChannels.set(resolved.channel, { hrid: resolved.channel, name });
+                // Notify pop-out of the updated channel list
+                if (this.relayChannel) {
+                    this.relayChannel.postMessage({ type: 'channels_updated', channels: this._getLiveChannels() });
+                }
+            }
+
+            // Buffer the message
+            if (!this.messageBuffer.has(resolved.channel)) {
+                this.messageBuffer.set(resolved.channel, []);
+            }
+            const buf = this.messageBuffer.get(resolved.channel);
+            buf.push(resolved);
+            if (buf.length > MAX_BUFFER) buf.shift();
+
+            // Relay to pop-out if open
+            if (this.relayChannel) {
+                this.relayChannel.postMessage(resolved);
+            }
+        }
+
+        /**
+         * Handle messages received from the pop-out window.
+         * @param {Object} data
+         */
+        _onSendChannelMessage(data) {
+            if (!data?.type) return;
+
+            if (data.type === 'ready') {
+                this._sendInit();
+            } else if (data.type === 'send') {
+                this._executeSend(data.channel, data.text);
+            }
+        }
+
+        /**
+         * Read the currently visible channel tabs from the game DOM.
+         * Falls back to the hardcoded CHANNELS list if the DOM isn't ready.
+         * @returns {Array<{hrid: string, name: string}>}
+         */
+        _getLiveChannels() {
+            const tabButtons = Array.from(
+                document.querySelectorAll('[class*="Chat_tabsComponentContainer"] button[role="tab"]')
+            );
+
+            let domChannels;
+            if (tabButtons.length === 0) {
+                domChannels = CHANNELS;
+            } else {
+                domChannels = tabButtons
+                    .map((btn) => {
+                        const hrid = btn.getAttribute('data-mention-channel');
+                        const name = btn.textContent?.trim().replace(/\d+$/, '').trim();
+                        return hrid && name ? { hrid, name } : null;
+                    })
+                    .filter(Boolean);
+            }
+
+            // Merge in any channels discovered via incoming messages (e.g. language channels without data-mention-channel)
+            const knownHrids = new Set(domChannels.map((c) => c.hrid));
+            const extra = Array.from(this.discoveredChannels.values()).filter((c) => !knownHrids.has(c.hrid));
+
+            return [...domChannels, ...extra];
+        }
+
+        /**
+         * Send initialization data to the pop-out.
+         */
+        _sendInit() {
+            if (!this.relayChannel) return;
+
+            // Serialize buffer: Map → plain object, filtering blocked players
+            const bufferSnapshot = {};
+            for (const [hrid, messages] of this.messageBuffer.entries()) {
+                bufferSnapshot[hrid] = messages.filter((msg) => msg.isSystem || !chatBlockList.isBlocked(msg.sName));
+            }
+
+            this.relayChannel.postMessage({
+                type: 'init',
+                channels: this._getLiveChannels(),
+                characterName: dataManager.getCurrentCharacterName() || '',
+                messageBuffer: bufferSnapshot,
+            });
+        }
+
+        /**
+         * Open the pop-out window and write the self-contained HTML into it.
+         */
+        _openPopout() {
+            // Re-focus if already open
+            if (this.popoutWindow && !this.popoutWindow.closed) {
+                this.popoutWindow.focus();
+                return;
+            }
+
+            this.popoutWindow = window.open('', 'mwi-chat-popout', 'width=960,height=720,resizable=yes');
+
+            if (!this.popoutWindow) {
+                console.error('[PopOutChat] window.open() blocked — allow pop-ups for this site');
+                return;
+            }
+
+            const html = this._buildPopoutHTML();
+            this.popoutWindow.document.open();
+            this.popoutWindow.document.write(html);
+            this.popoutWindow.document.close();
+        }
+
+        /**
+         * Execute a send request from the pop-out: switch to the right channel tab,
+         * set the input value, and dispatch Enter.
+         * @param {string} channelHrid
+         * @param {string} text
+         */
+        _executeSend(channelHrid, text) {
+            if (!text?.trim()) return;
+
+            const chatPanel = document.querySelector('[class*="GamePage_chatPanel"]');
+            if (!chatPanel) return;
+
+            const channelName = CHANNEL_NAME_MAP[channelHrid];
+            if (!channelName) return;
+
+            const tabButtons = Array.from(chatPanel.querySelectorAll('button[role="tab"]'));
+            const tabBtn = tabButtons.find((btn) => {
+                const label = btn.textContent?.trim().replace(/\d+$/, '').trim();
+                return label === channelName;
+            });
+
+            const doSend = () => {
+                const input = chatPanel.querySelector('[class*="Chat_chatInputContainer"] input');
+                if (!input) return;
+
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSetter.call(input, text.trim());
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+
+                // Yield to let React process the state update, then fire Enter
+                const t = setTimeout(() => {
+                    input.focus();
+                    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+                }, 0);
+                this.timerRegistry.registerTimeout(t);
+            };
+
+            if (tabBtn) {
+                tabBtn.click();
+                const t = setTimeout(doSend, 80);
+                this.timerRegistry.registerTimeout(t);
+            } else {
+                doSend();
+            }
+        }
+
+        /**
+         * Build the self-contained HTML string for the pop-out window.
+         * @returns {string}
+         */
+        _buildPopoutHTML() {
+            return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MWI Chat</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0b0e14;
+    --topbg: #0d1117;
+    --accent: #d7b7ff;
+    --text: #cfd6e6;
+    --muted: #8b949e;
+    --border: rgba(255,255,255,0.07);
+    --input-bg: #0f1216;
+    --send-bg: #238636;
+    --system: #8b949e;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: Inter, system-ui, sans-serif; font-size: 13px; overflow: hidden; }
+
+  /* Top bar */
+  #topbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; height: 46px;
+    background: var(--topbg); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #topbar-title { font-weight: 700; color: var(--accent); font-size: 13px; }
+  #topbar-name { color: var(--muted); font-size: 11px; }
+  #add-pane-btn {
+    margin-left: 4px; padding: 4px 10px; font-size: 11px;
+    background: rgba(215,183,255,0.1); color: var(--accent);
+    border: 1px solid rgba(215,183,255,0.25); border-radius: 6px; cursor: pointer;
+  }
+  #add-pane-btn:hover { background: rgba(215,183,255,0.2); }
+  #add-pane-btn:disabled { opacity: 0.4; cursor: default; }
+  #vertical-label {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 12px; color: #8b949e; cursor: pointer; user-select: none;
+  }
+  #vertical-label input { cursor: pointer; accent-color: #d7b7ff; }
+  #disconnect-banner {
+    display: none; margin-left: auto;
+    padding: 3px 10px; background: rgba(220,50,50,0.2);
+    border: 1px solid rgba(220,50,50,0.4); border-radius: 5px;
+    color: #ff9999; font-size: 11px;
+  }
+  #disconnect-banner.visible { display: block; }
+
+  /* Pane grid */
+  #panes {
+    display: grid;
+    grid-template-rows: 1fr;
+    height: calc(100vh - 46px);
+    gap: 0;
+    overflow: hidden;
+  }
+
+  /* Individual pane */
+  .pane {
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+    min-width: 0; overflow: hidden;
+  }
+  .pane:last-child { border-right: none; }
+
+  /* Pane header */
+  .pane-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px; background: var(--topbg);
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .pane-drag-handle {
+    color: var(--muted); font-size: 14px; cursor: grab;
+    padding: 0 2px; line-height: 1; user-select: none; flex-shrink: 0;
+  }
+  .pane-drag-handle:active { cursor: grabbing; }
+  .pane-channel-select {
+    flex: 1; background: var(--input-bg); color: var(--text);
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 5px;
+    padding: 4px 6px; font-size: 12px; outline: none; cursor: pointer;
+  }
+  .pane-close-btn {
+    background: none; border: none; color: var(--muted);
+    font-size: 14px; cursor: pointer; padding: 0 2px; line-height: 1;
+  }
+  .pane-close-btn:hover { color: var(--text); }
+  .pane.drag-over-before { box-shadow: -3px 0 0 0 var(--accent); }
+  .pane.drag-over-after  { box-shadow:  3px 0 0 0 var(--accent); }
+  .pane.drag-over-before.vertical-drop { box-shadow: 0 -3px 0 0 var(--accent); }
+  .pane.drag-over-after.vertical-drop  { box-shadow: 0  3px 0 0 var(--accent); }
+
+  /* Message list */
+  .pane-messages {
+    flex: 1; overflow-y: auto; padding: 8px 10px;
+    display: flex; flex-direction: column; gap: 3px;
+    scroll-behavior: smooth;
+  }
+  .msg { line-height: 1.45; padding: 2px 4px; border-radius: 3px; word-break: break-word; }
+  .msg:hover { background: rgba(255,255,255,0.03); }
+  .msg-time { color: var(--muted); font-size: 10px; margin-right: 5px; }
+  .msg-name { color: var(--accent); font-weight: 600; margin-right: 4px; }
+  .msg-text { color: var(--text); }
+  .msg-link { color: #60a5fa; font-size: 11px; margin-left: 4px; }
+  .msg-system { color: var(--system); font-style: italic; }
+
+  /* Footer / input */
+  .pane-footer {
+    display: flex; gap: 6px; align-items: center;
+    padding: 8px 10px; border-top: 1px solid var(--border);
+    background: var(--topbg); flex-shrink: 0;
+  }
+  .pane-input {
+    flex: 1; background: var(--input-bg); color: var(--text);
+    border: 1px solid #30363d; border-radius: 5px;
+    padding: 7px 10px; font-size: 13px; outline: none;
+    font-family: inherit;
+  }
+  .pane-input:focus { border-color: rgba(215,183,255,0.4); }
+  .pane-send-btn {
+    background: var(--send-bg); color: #fff;
+    border: none; border-radius: 5px;
+    padding: 7px 14px; font-size: 12px; font-weight: bold; cursor: pointer;
+    white-space: nowrap;
+  }
+  .pane-send-btn:hover { opacity: 0.85; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <span id="topbar-title">MWI Chat</span>
+  <span id="topbar-name"></span>
+  <button id="add-pane-btn">+ Pane</button>
+  <label id="vertical-label"><input type="checkbox" id="vertical-toggle"> Vertical</label>
+  <div id="disconnect-banner">⚠ Disconnected from game tab</div>
+</div>
+<div id="panes"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  const RELAY = '${RELAY_CHANNEL}';
+  const SEND  = '${SEND_CHANNEL}';
+  const MAX_PER_CHANNEL = 500;
+  const STORAGE_KEY = 'mwi-chat-popout-layout';
+
+  const relay  = new BroadcastChannel(RELAY);
+  const sendCh = new BroadcastChannel(SEND);
+
+  let channels     = [];
+  let characterName = '';
+  let messageBuffer = {}; // hrid → Array<msg>
+  let panes        = [];
+  let pingTimeout  = null;
+  let paneIdSeq    = 0;
+
+  // ── DOM refs ──────────────────────────────────────────────────
+  const panesEl        = document.getElementById('panes');
+  const addPaneBtn     = document.getElementById('add-pane-btn');
+  const verticalToggle = document.getElementById('vertical-toggle');
+  const nameEl         = document.getElementById('topbar-name');
+  const disconnectEl   = document.getElementById('disconnect-banner');
+
+  // ── Ping watchdog ─────────────────────────────────────────────
+  function resetPingWatchdog() {
+    clearTimeout(pingTimeout);
+    disconnectEl.classList.remove('visible');
+    pingTimeout = setTimeout(() => disconnectEl.classList.add('visible'), 15000);
+  }
+
+  // ── BroadcastChannel messages ─────────────────────────────────
+  relay.onmessage = ({ data }) => {
+    if (data.type === 'ping') {
+      resetPingWatchdog();
+      return;
+    }
+    if (data.type === 'init') {
+      channels      = data.channels || [];
+      characterName = data.characterName || '';
+      messageBuffer = data.messageBuffer || {};
+      nameEl.textContent = characterName ? '— ' + characterName : '';
+      panes.forEach(p => refreshPaneSelect(p));
+      resetPingWatchdog();
+      return;
+    }
+    if (data.type === 'channels_updated') {
+      channels = data.channels || [];
+      panes.forEach(p => refreshPaneSelect(p));
+      return;
+    }
+    if (data.type === 'chat_message') {
+      // Buffer incoming
+      if (!messageBuffer[data.channel]) messageBuffer[data.channel] = [];
+      messageBuffer[data.channel].push(data);
+      if (messageBuffer[data.channel].length > MAX_PER_CHANNEL) {
+        messageBuffer[data.channel].shift();
+      }
+      // Route to matching panes
+      panes.forEach(p => {
+        if (p.channelHrid === data.channel) appendMessage(p, data);
+      });
+    }
+  };
+
+  // Signal ready
+  sendCh.postMessage({ type: 'ready' });
+  resetPingWatchdog();
+
+  // ── Pane management ───────────────────────────────────────────
+  function createPane(initialHrid) {
+    const id = ++paneIdSeq;
+    const hrid = initialHrid || (channels[0]?.hrid || '');
+
+    const pane = document.createElement('div');
+    pane.className = 'pane';
+    pane.dataset.paneId = id;
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'pane-header';
+
+    const dragHandle = document.createElement('span');
+    dragHandle.className = 'pane-drag-handle';
+    dragHandle.textContent = '⠿';
+    dragHandle.title = 'Drag to reorder';
+
+    const select = document.createElement('select');
+    select.className = 'pane-channel-select';
+    populateSelect(select, channels, hrid);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'pane-close-btn';
+    closeBtn.textContent = '✕';
+    closeBtn.title = 'Close pane';
+    closeBtn.addEventListener('click', () => removePane(id));
+
+    header.appendChild(dragHandle);
+    header.appendChild(select);
+    header.appendChild(closeBtn);
+
+    // Messages
+    const messages = document.createElement('div');
+    messages.className = 'pane-messages';
+
+    // Footer
+    const footer = document.createElement('div');
+    footer.className = 'pane-footer';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'pane-input';
+    input.placeholder = 'Type a message...';
+    input.maxLength = 500;
+
+    const sendBtn = document.createElement('button');
+    sendBtn.className = 'pane-send-btn';
+    sendBtn.textContent = 'SEND';
+
+    const doSend = () => {
+      const text = input.value.trim();
+      if (!text || !paneObj.channelHrid) return;
+      sendCh.postMessage({ type: 'send', channel: paneObj.channelHrid, text });
+      input.value = '';
+      input.focus();
+    };
+
+    sendBtn.addEventListener('click', doSend);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    });
+
+    footer.appendChild(input);
+    footer.appendChild(sendBtn);
+
+    pane.appendChild(header);
+    pane.appendChild(messages);
+    pane.appendChild(footer);
+
+    // Drag-to-reorder
+    pane.draggable = true;
+    pane.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(id));
+      // Use the handle as the drag image anchor so the whole pane moves naturally
+      setTimeout(() => pane.style.opacity = '0.5', 0);
+    });
+    pane.addEventListener('dragend', () => {
+      pane.style.opacity = '';
+      clearDragOver();
+    });
+    pane.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      clearDragOver();
+      const vertical = verticalToggle.checked;
+      const rect = pane.getBoundingClientRect();
+      const mid = vertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+      const before = vertical ? e.clientY < mid : e.clientX < mid;
+      pane.classList.add(before ? 'drag-over-before' : 'drag-over-after');
+      if (vertical) pane.classList.add('vertical-drop');
+    });
+    pane.addEventListener('dragleave', () => clearDragOver());
+    pane.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const srcId = parseInt(e.dataTransfer.getData('text/plain'), 10);
+      if (srcId === id) return;
+      const srcIdx = panes.findIndex(p => p.id === srcId);
+      const tgtIdx = panes.findIndex(p => p.id === id);
+      if (srcIdx === -1 || tgtIdx === -1) return;
+      const vertical = verticalToggle.checked;
+      const rect = pane.getBoundingClientRect();
+      const mid = vertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+      const insertBefore = vertical ? e.clientY < mid : e.clientX < mid;
+      // Reorder DOM
+      if (insertBefore) {
+        panesEl.insertBefore(panes[srcIdx].pane, pane);
+      } else {
+        pane.insertAdjacentElement('afterend', panes[srcIdx].pane);
+      }
+      // Sync panes array to match DOM order
+      const [moved] = panes.splice(srcIdx, 1);
+      const newTgtIdx = panes.findIndex(p => p.id === id);
+      panes.splice(insertBefore ? newTgtIdx : newTgtIdx + 1, 0, moved);
+      clearDragOver();
+      saveLayout();
+    });
+
+    panesEl.appendChild(pane);
+
+    const paneObj = { id, pane, select, messages, input, channelHrid: hrid };
+    panes.push(paneObj);
+
+    select.addEventListener('change', () => {
+      paneObj.channelHrid = select.value;
+      messages.innerHTML = '';
+      (messageBuffer[paneObj.channelHrid] || []).forEach(msg => appendMessage(paneObj, msg));
+      saveLayout();
+    });
+
+    // Pre-populate with buffered messages
+    (messageBuffer[hrid] || []).forEach(msg => appendMessage(paneObj, msg));
+
+    updateGrid();
+    updateAddButton();
+    return paneObj;
+  }
+
+  function removePane(id) {
+    if (panes.length <= 1) return; // Keep at least one pane
+    const idx = panes.findIndex(p => p.id === id);
+    if (idx === -1) return;
+    panes[idx].pane.remove();
+    panes.splice(idx, 1);
+    updateGrid();
+    updateAddButton();
+    saveLayout();
+  }
+
+  function clearDragOver() {
+    document.querySelectorAll('.pane').forEach(el => {
+      el.classList.remove('drag-over-before', 'drag-over-after', 'vertical-drop');
+    });
+  }
+
+  function updateGrid() {
+    const vertical = document.getElementById('vertical-toggle')?.checked;
+    if (vertical) {
+      panesEl.style.gridTemplateRows = '1fr';
+      panesEl.style.gridTemplateColumns = panes.map(() => '1fr').join(' ');
+    } else {
+      panesEl.style.gridTemplateColumns = '1fr';
+      panesEl.style.gridTemplateRows = panes.map(() => '1fr').join(' ');
+    }
+  }
+
+  function updateAddButton() {
+    // No pane limit
+  }
+
+  function populateSelect(select, channelList, activeHrid) {
+    select.innerHTML = '';
+    channelList.forEach(ch => {
+      const opt = document.createElement('option');
+      opt.value = ch.hrid;
+      opt.textContent = ch.name;
+      if (ch.hrid === activeHrid) opt.selected = true;
+      select.appendChild(opt);
+    });
+  }
+
+  function refreshPaneSelect(paneObj) {
+    const current = paneObj.channelHrid;
+    populateSelect(paneObj.select, channels, current);
+    paneObj.select.value = current;
+  }
+
+  // ── Message rendering ─────────────────────────────────────────
+  function formatTime(isoString) {
+    if (!isoString) return '';
+    const d = new Date(isoString);
+    const use12Hour = ${config.getSettingValue('market_listingTimeFormat', '24hour') === '12hour'};
+    return d
+        .toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', hour12: use12Hour })
+        .trim();
+  }
+
+  function linkifyText(el, text) {
+    // Use RegExp constructor to avoid literal slashes being misread by document.write HTML parser
+    const URL_RE = new RegExp('https?://[^ \\t\\r\\n<>\\x22\\x27]+', 'g');
+    let last = 0;
+    let match;
+    while ((match = URL_RE.exec(text)) !== null) {
+      if (match.index > last) {
+        el.appendChild(document.createTextNode(text.slice(last, match.index)));
+      }
+      const a = document.createElement('a');
+      a.href = match[0];
+      a.textContent = match[0];
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.cssText = 'color: #60a5fa; word-break: break-all;';
+      el.appendChild(a);
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) {
+      el.appendChild(document.createTextNode(text.slice(last)));
+    }
+  }
+
+  function appendMessage(paneObj, msg) {
+    const { messages } = paneObj;
+    const atBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40;
+
+    const row = document.createElement('div');
+    row.className = msg.isSystem ? 'msg msg-system' : 'msg';
+
+    if (msg.isSystem) {
+      const timeEl = document.createElement('span');
+      timeEl.className = 'msg-time';
+      timeEl.textContent = formatTime(msg.t);
+      const textEl = document.createElement('span');
+      textEl.className = 'msg-text';
+      textEl.textContent = msg.m;
+      row.appendChild(timeEl);
+      row.appendChild(textEl);
+    } else {
+      const timeEl = document.createElement('span');
+      timeEl.className = 'msg-time';
+      timeEl.textContent = formatTime(msg.t);
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'msg-name';
+      nameEl.textContent = msg.sName;
+
+      const textEl = document.createElement('span');
+      textEl.className = 'msg-text';
+      linkifyText(textEl, msg.m);
+
+      row.appendChild(timeEl);
+      row.appendChild(nameEl);
+      row.appendChild(textEl);
+
+      if (msg.renderedLinks && msg.renderedLinks.length > 0) {
+        msg.renderedLinks.forEach(linkStr => {
+          const linkEl = document.createElement('span');
+          linkEl.className = 'msg-link';
+          linkEl.textContent = linkStr;
+          row.appendChild(linkEl);
+        });
+      }
+    }
+
+    messages.appendChild(row);
+
+    // Trim to MAX_PER_CHANNEL rendered rows
+    while (messages.children.length > MAX_PER_CHANNEL) {
+      messages.removeChild(messages.firstChild);
+    }
+
+    if (atBottom) messages.scrollTop = messages.scrollHeight;
+  }
+
+  // ── Layout persistence ────────────────────────────────────────
+  function saveLayout() {
+    try {
+      const layout = {
+        vertical: verticalToggle.checked,
+        panes: panes.map(p => ({ channelHrid: p.channelHrid })),
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(layout));
+    } catch { /* ignore */ }
+  }
+
+  function loadLayout() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
+
+  // ── Init ──────────────────────────────────────────────────────
+  verticalToggle.addEventListener('change', () => { updateGrid(); saveLayout(); });
+
+  addPaneBtn.addEventListener('click', () => {
+    // Pick a channel not already in use if possible
+    const usedHrids = new Set(panes.map(p => p.channelHrid));
+    const next = channels.find(c => !usedHrids.has(c.hrid)) || channels[0];
+    createPane(next?.hrid);
+    saveLayout();
+  });
+
+  // Restore saved layout, or create a single default pane
+  const savedLayout = loadLayout();
+  if (savedLayout) {
+    if (savedLayout.vertical) {
+      verticalToggle.checked = true;
+    }
+    const savedPanes = savedLayout.panes || [];
+    if (savedPanes.length > 0) {
+      savedPanes.forEach(p => createPane(p.channelHrid));
+    } else {
+      createPane(channels[0]?.hrid || '/chat_channel_types/general');
+    }
+  } else {
+    // Create initial pane (default to General, or first available)
+    const defaultHrid = channels[0]?.hrid || '/chat_channel_types/general';
+    createPane(defaultHrid);
+  }
+
+})();
+</script>
+</body>
+</html>`;
+        }
+
+        /**
+         * Disable the feature and clean up all resources.
+         */
+        disable() {
+            if (this.wsHandler) {
+                webSocketHook.off('chat_message_received', this.wsHandler);
+                this.wsHandler = null;
+            }
+
+            if (this.relayChannel) {
+                this.relayChannel.close();
+                this.relayChannel = null;
+            }
+
+            if (this.sendChannel) {
+                this.sendChannel.close();
+                this.sendChannel = null;
+            }
+
+            if (this.popoutWindow && !this.popoutWindow.closed) {
+                this.popoutWindow.close();
+            }
+            this.popoutWindow = null;
+
+            this.timerRegistry.clearAll();
+
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            if (this.popoutBtn && document.contains(this.popoutBtn)) {
+                this.popoutBtn.remove();
+            }
+            this.popoutBtn = null;
+
+            this.messageBuffer.clear();
+            this.initialized = false;
+        }
+    }
+
+    var popOutChat = {
+        name: 'Pop-Out Chat',
+        initialize: async () => {
+            const instance = new PopOutChat();
+            await instance.initialize();
+            return instance;
+        },
+        cleanup: (instance) => {
+            if (instance) instance.disable();
+        },
+    };
+
+    /**
+     * Gathering Profit Calculator
+     *
+     * Calculates comprehensive profit/hour for gathering actions (Foraging, Woodcutting, Milking) including:
+     * - All drop table items at market prices
+     * - Drink consumption costs
+     * - Equipment speed bonuses
+     * - Efficiency buffs (level, house, tea, equipment)
+     * - Gourmet tea bonus items (production skills only)
+     * - Market tax (2%)
+     */
+
+
+    /**
+     * Cache for processing action conversions (inputItemHrid → conversion data)
+     * Built once per game data load to avoid O(n) searches through action map
+     */
+    let processingConversionCache = null;
+
+    /**
+     * Build processing conversion cache from game data
+     * @param {Object} gameData - Game data from dataManager
+     * @returns {Map} Map of inputItemHrid → {actionHrid, outputItemHrid, conversionRatio}
+     */
+    function buildProcessingConversionCache(gameData) {
+        const cache = new Map();
+        const validProcessingTypes = [
+            '/action_types/cheesesmithing', // Milk → Cheese conversions
+            '/action_types/crafting', // Log → Lumber conversions
+            '/action_types/tailoring', // Cotton/Flax/Bamboo/Cocoon/Radiant → Fabric conversions
+        ];
+
+        for (const [actionHrid, action] of Object.entries(gameData.actionDetailMap)) {
+            if (!validProcessingTypes.includes(action.type)) {
+                continue;
+            }
+
+            const inputItem = action.inputItems?.[0];
+            const outputItem = action.outputItems?.[0];
+
+            if (inputItem && outputItem) {
+                cache.set(inputItem.itemHrid, {
+                    actionHrid: actionHrid,
+                    outputItemHrid: outputItem.itemHrid,
+                    conversionRatio: inputItem.count,
+                });
+            }
+        }
+
+        return cache;
+    }
+
+    /**
+     * Calculate comprehensive profit for a gathering action
+     * @param {string} actionHrid - Action HRID (e.g., "/actions/foraging/asteroid_belt")
+     * @returns {Object|null} Profit data or null if not applicable
+     */
+    async function calculateGatheringProfit(actionHrid) {
+        const gameData = dataManager.getInitClientData();
+        const actionDetail = gameData.actionDetailMap[actionHrid];
+
+        if (!actionDetail) {
+            return null;
+        }
+
+        // Only process gathering actions (Foraging, Woodcutting, Milking) with drop tables
+        if (!profitConstants_js.GATHERING_TYPES.includes(actionDetail.type)) {
+            return null;
+        }
+
+        if (!actionDetail.dropTable) {
+            return null; // No drop table - nothing to calculate
+        }
+
+        // Build processing conversion cache once (lazy initialization)
+        if (!processingConversionCache) {
+            processingConversionCache = buildProcessingConversionCache(gameData);
+        }
+
+        const priceCache = new Map();
+        const getCachedPrice = (itemHrid, options) => {
+            const side = options?.side || '';
+            const enhancementLevel = options?.enhancementLevel ?? '';
+            const cacheKey = `${itemHrid}|${side}|${enhancementLevel}`;
+
+            if (priceCache.has(cacheKey)) {
+                return priceCache.get(cacheKey);
+            }
+
+            const price = marketData_js.getItemPrice(itemHrid, options);
+            priceCache.set(cacheKey, price);
+            return price;
+        };
+
+        // Note: Market API is pre-loaded by caller (max-produceable.js)
+        // No need to check or fetch here
+
+        // Get character data
+        const equipment = dataManager.getEquipment();
+        const skills = dataManager.getSkills();
+        const houseRooms = Array.from(dataManager.getHouseRooms().values());
+
+        // Calculate action time per action (with speed bonuses)
+        const baseTimePerActionSec = actionDetail.baseTimeCost / 1000000000;
+        const speedBonus = equipmentParser_js.parseEquipmentSpeedBonuses(equipment, actionDetail.type, gameData.itemDetailMap);
+        const personalSpeedBonus = dataManager.getPersonalBuffFlatBoost(actionDetail.type, '/buff_types/action_speed');
+        // speedBonus is already a decimal (e.g., 0.15 for 15%), don't divide by 100
+        const actualTimePerActionSec = baseTimePerActionSec / (1 + speedBonus + personalSpeedBonus);
+
+        // Calculate actions per hour
+        const actionsPerHour = profitHelpers_js.calculateActionsPerHour(actualTimePerActionSec);
+
+        // Get character's actual equipped drink slots for this action type (from WebSocket data)
+        const drinkSlots = dataManager.getActionDrinkSlots(actionDetail.type);
+
+        // Get drink concentration from equipment
+        const drinkConcentration = teaParser_js.getDrinkConcentration(equipment, gameData.itemDetailMap);
+
+        // Parse tea buffs
+        const teaEfficiency = teaParser_js.parseTeaEfficiency(actionDetail.type, drinkSlots, gameData.itemDetailMap, drinkConcentration);
+
+        // Gourmet Tea only applies to production skills (Brewing, Cooking, Cheesesmithing, Crafting, Tailoring)
+        // NOT gathering skills (Foraging, Woodcutting, Milking)
+        const gourmetBonus = profitConstants_js.PRODUCTION_TYPES.includes(actionDetail.type)
+            ? teaParser_js.parseGourmetBonus(drinkSlots, gameData.itemDetailMap, drinkConcentration) +
+              dataManager.getPersonalBuffFlatBoost(actionDetail.type, '/buff_types/gourmet')
+            : 0;
+
+        // Processing Tea: 15% base chance to convert raw → processed (Cotton → Cotton Fabric, etc.)
+        // Only applies to gathering skills (Foraging, Woodcutting, Milking)
+        const processingBonus = profitConstants_js.GATHERING_TYPES.includes(actionDetail.type)
+            ? teaParser_js.parseProcessingBonus(drinkSlots, gameData.itemDetailMap, drinkConcentration) +
+              dataManager.getPersonalBuffFlatBoost(actionDetail.type, '/buff_types/processing')
+            : 0;
+
+        // Gathering Quantity: Increases item drop amounts (min/max)
+        // Sources: Gathering Tea (15% base), Community Buff (20% base + 0.5%/level), Achievement Tiers
+        // Only applies to gathering skills (Foraging, Woodcutting, Milking)
+        let totalGathering = 0;
+        let gatheringTea = 0;
+        let communityGathering = 0;
+        let achievementGathering = 0;
+        let personalGathering = 0;
+        if (profitConstants_js.GATHERING_TYPES.includes(actionDetail.type)) {
+            // Parse Gathering Tea bonus
+            gatheringTea = teaParser_js.parseGatheringBonus(drinkSlots, gameData.itemDetailMap, drinkConcentration);
+
+            // Get Community Buff level for gathering quantity
+            const communityBuffLevel = dataManager.getCommunityBuffLevel('/community_buff_types/gathering_quantity');
+            communityGathering = communityBuffLevel ? 0.2 + (communityBuffLevel - 1) * 0.005 : 0;
+
+            // Get Achievement buffs for this action type (Beginner tier: +2% Gathering Quantity)
+            achievementGathering = dataManager.getAchievementBuffFlatBoost(actionDetail.type, '/buff_types/gathering');
+
+            // Get personal buff (Seal of Gathering)
+            personalGathering = dataManager.getPersonalBuffFlatBoost(actionDetail.type, '/buff_types/gathering');
+
+            // Stack all bonuses additively
+            totalGathering = gatheringTea + communityGathering + achievementGathering + personalGathering;
+        }
+
+        const teaCostData = profitHelpers_js.calculateTeaCostsPerHour({
+            drinkSlots,
+            drinkConcentration,
+            itemDetailMap: gameData.itemDetailMap,
+            getItemPrice: getCachedPrice,
+        });
+        const drinkCostPerHour = teaCostData.totalCostPerHour;
+        const drinkCosts = teaCostData.costs.map((tea) => ({
+            name: tea.itemName,
+            priceEach: tea.pricePerDrink,
+            drinksPerHour: tea.drinksPerHour,
+            costPerHour: tea.totalCost,
+            missingPrice: tea.missingPrice,
+        }));
+
+        // Calculate level efficiency bonus
+        if (!actionDetail.levelRequirement) {
+            console.error(`[GatheringProfit] Action has no levelRequirement: ${actionDetail.hrid}`);
+        }
+        const requiredLevel = actionDetail.levelRequirement?.level || 1;
+        const skillHrid = actionDetail.levelRequirement?.skillHrid;
+        let currentLevel = requiredLevel;
+        for (const skill of skills) {
+            if (skill.skillHrid === skillHrid) {
+                currentLevel = skill.level;
+                break;
+            }
+        }
+
+        // Calculate tea skill level bonus (e.g., +5 Foraging from Ultra Foraging Tea)
+        const teaSkillLevelBonus = teaParser_js.parseTeaSkillLevelBonus(
+            actionDetail.type,
+            drinkSlots,
+            gameData.itemDetailMap,
+            drinkConcentration
+        );
+
+        // Calculate house efficiency bonus
+        let houseEfficiency = 0;
+        for (const room of houseRooms) {
+            const roomDetail = gameData.houseRoomDetailMap?.[room.houseRoomHrid];
+            if (roomDetail?.usableInActionTypeMap?.[actionDetail.type]) {
+                houseEfficiency += (room.level || 0) * 1.5;
+            }
+        }
+
+        // Calculate equipment efficiency bonus (uses equipment-parser utility)
+        const equipmentEfficiency = equipmentParser_js.parseEquipmentEfficiencyBonuses(equipment, actionDetail.type, gameData.itemDetailMap);
+        const equipmentEfficiencyItems = equipmentParser_js.parseEquipmentEfficiencyBreakdown(
+            equipment,
+            actionDetail.type,
+            gameData.itemDetailMap
+        );
+        const achievementEfficiency =
+            dataManager.getAchievementBuffFlatBoost(actionDetail.type, '/buff_types/efficiency') * 100;
+        const personalEfficiency = dataManager.getPersonalBuffFlatBoost(actionDetail.type, '/buff_types/efficiency') * 100;
+
+        const efficiencyBreakdown = efficiency_js.calculateEfficiencyBreakdown({
+            requiredLevel,
+            skillLevel: currentLevel,
+            teaSkillLevelBonus,
+            houseEfficiency,
+            teaEfficiency,
+            equipmentEfficiency,
+            achievementEfficiency,
+            personalEfficiency,
+        });
+        const totalEfficiency = efficiencyBreakdown.totalEfficiency;
+        const levelEfficiency = efficiencyBreakdown.levelEfficiency;
+
+        // Calculate efficiency multiplier (matches production profit calculator pattern)
+        // Efficiency "repeats the action" - we apply it to item outputs, not action rate
+        const efficiencyMultiplier = efficiency_js.calculateEfficiencyMultiplier(totalEfficiency);
+
+        // Calculate revenue from drop table
+        // Processing happens PER ACTION (before efficiency multiplies the count)
+        // So we calculate per-action outputs, then multiply by actionsPerHour and efficiency
+        let baseRevenuePerHour = 0;
+        let gourmetRevenueBonus = 0;
+        let gourmetRevenueBonusPerAction = 0;
+        let processingRevenueBonus = 0; // Track extra revenue from Processing Tea
+        let processingRevenueBonusPerAction = 0; // Per-action processing revenue
+        const processingConversions = []; // Track conversion details for display
+        const baseOutputs = []; // Baseline outputs (before gourmet and processing)
+        const gourmetBonuses = []; // Gourmet bonus outputs (display-only)
+        const dropTable = actionDetail.dropTable;
+
+        for (const drop of dropTable) {
+            const rawPrice = getCachedPrice(drop.itemHrid, { context: 'profit', side: 'sell' });
+            const rawPriceMissing = rawPrice === null;
+            const resolvedRawPrice = rawPriceMissing ? 0 : rawPrice;
+            // Apply gathering quantity bonus to drop amounts
+            const baseAvgAmount = (drop.minCount + drop.maxCount) / 2;
+            const avgAmountPerAction = baseAvgAmount * (1 + totalGathering);
+
+            // Check if this item has a Processing Tea conversion (using cache for O(1) lookup)
+            // Processing Tea only applies to: Milk→Cheese, Log→Lumber, Cotton/Flax/Bamboo/Cocoon/Radiant→Fabric
+            const conversionData = processingConversionCache.get(drop.itemHrid);
+            const processedItemHrid = conversionData?.outputItemHrid || null;
+            conversionData?.actionHrid || null;
+
+            // Per-action calculations (efficiency will be applied when converting to items per hour)
+            let rawPerAction = 0;
+            let processedPerAction = 0;
+
+            const rawItemName = gameData.itemDetailMap[drop.itemHrid]?.name || 'Unknown';
+            const baseItemsPerHour = actionsPerHour * drop.dropRate * avgAmountPerAction * efficiencyMultiplier;
+            const baseItemsPerAction = drop.dropRate * avgAmountPerAction;
+            const baseRevenuePerAction = baseItemsPerAction * resolvedRawPrice;
+            const baseRevenueLine = baseItemsPerHour * resolvedRawPrice;
+            baseRevenuePerHour += baseRevenueLine;
+
+            baseOutputs.push({
+                itemHrid: drop.itemHrid,
+                name: rawItemName,
+                itemsPerHour: baseItemsPerHour,
+                itemsPerAction: baseItemsPerAction,
+                dropRate: drop.dropRate,
+                priceEach: resolvedRawPrice,
+                revenuePerHour: baseRevenueLine,
+                revenuePerAction: baseRevenuePerAction,
+                missingPrice: rawPriceMissing,
+            });
+
+            if (processedItemHrid && processingBonus > 0) {
+                // Get conversion ratio from cache (e.g., 1 Milk → 1 Cheese)
+                const conversionRatio = conversionData.conversionRatio;
+
+                // Processing Tea check happens per action:
+                // If procs (processingBonus% chance): Convert to processed + leftover
+                const processedIfProcs = Math.floor(avgAmountPerAction / conversionRatio);
+                const rawLeftoverIfProcs = avgAmountPerAction % conversionRatio;
+
+                // If doesn't proc: All stays raw
+                const rawIfNoProc = avgAmountPerAction;
+
+                // Expected value per action
+                processedPerAction = processingBonus * processedIfProcs;
+                rawPerAction = processingBonus * rawLeftoverIfProcs + (1 - processingBonus) * rawIfNoProc;
+
+                const processedPrice = getCachedPrice(processedItemHrid, { context: 'profit', side: 'sell' });
+                const processedPriceMissing = processedPrice === null;
+                const resolvedProcessedPrice = processedPriceMissing ? 0 : processedPrice;
+
+                const processedItemsPerHour = actionsPerHour * drop.dropRate * processedPerAction * efficiencyMultiplier;
+                const processedItemsPerAction = drop.dropRate * processedPerAction;
+
+                // Track processing details
+                const processedItemName = gameData.itemDetailMap[processedItemHrid]?.name || 'Unknown';
+
+                // Value gain per conversion = cheese value - cost of milk used
+                const costOfMilkUsed = conversionRatio * resolvedRawPrice;
+                const valueGainPerConversion = resolvedProcessedPrice - costOfMilkUsed;
+                const revenueFromConversion = processedItemsPerHour * valueGainPerConversion;
+                const rawConsumedPerHour = processedItemsPerHour * conversionRatio;
+                const rawConsumedPerAction = processedItemsPerAction * conversionRatio;
+
+                processingRevenueBonus += revenueFromConversion;
+                processingRevenueBonusPerAction += processedItemsPerAction * valueGainPerConversion;
+                processingConversions.push({
+                    rawItem: rawItemName,
+                    processedItem: processedItemName,
+                    valueGain: valueGainPerConversion,
+                    conversionsPerHour: processedItemsPerHour,
+                    conversionsPerAction: processedItemsPerAction,
+                    rawConsumedPerHour,
+                    rawConsumedPerAction,
+                    rawPriceEach: resolvedRawPrice,
+                    processedPriceEach: resolvedProcessedPrice,
+                    revenuePerHour: revenueFromConversion,
+                    revenuePerAction: processedItemsPerAction * valueGainPerConversion,
+                    missingPrice: rawPriceMissing || processedPriceMissing,
+                });
+            } else {
+                // No processing - simple calculation
+                rawPerAction = avgAmountPerAction;
+            }
+
+            // Gourmet tea bonus (only for production skills, not gathering)
+            if (gourmetBonus > 0) {
+                const totalPerAction = rawPerAction + processedPerAction;
+                const bonusPerAction = totalPerAction * (gourmetBonus / 100);
+                const bonusItemsPerHour = actionsPerHour * drop.dropRate * bonusPerAction * efficiencyMultiplier;
+                const bonusItemsPerAction = drop.dropRate * bonusPerAction;
+
+                // Use weighted average price for gourmet bonus
+                if (processedItemHrid && processingBonus > 0) {
+                    const processedPrice = getCachedPrice(processedItemHrid, { context: 'profit', side: 'sell' });
+                    const processedPriceMissing = processedPrice === null;
+                    const resolvedProcessedPrice = processedPriceMissing ? 0 : processedPrice;
+                    const weightedPrice =
+                        (rawPerAction * resolvedRawPrice + processedPerAction * resolvedProcessedPrice) /
+                        (rawPerAction + processedPerAction);
+                    const bonusRevenue = bonusItemsPerHour * weightedPrice;
+                    gourmetRevenueBonus += bonusRevenue;
+                    gourmetRevenueBonusPerAction += bonusItemsPerAction * weightedPrice;
+                    gourmetBonuses.push({
+                        name: rawItemName,
+                        itemsPerHour: bonusItemsPerHour,
+                        itemsPerAction: bonusItemsPerAction,
+                        dropRate: drop.dropRate,
+                        priceEach: weightedPrice,
+                        revenuePerHour: bonusRevenue,
+                        revenuePerAction: bonusItemsPerAction * weightedPrice,
+                        missingPrice: rawPriceMissing || processedPriceMissing,
+                    });
+                } else {
+                    const bonusRevenue = bonusItemsPerHour * resolvedRawPrice;
+                    gourmetRevenueBonus += bonusRevenue;
+                    gourmetRevenueBonusPerAction += bonusItemsPerAction * resolvedRawPrice;
+                    gourmetBonuses.push({
+                        name: rawItemName,
+                        itemsPerHour: bonusItemsPerHour,
+                        itemsPerAction: bonusItemsPerAction,
+                        dropRate: drop.dropRate,
+                        priceEach: resolvedRawPrice,
+                        revenuePerHour: bonusRevenue,
+                        revenuePerAction: bonusItemsPerAction * resolvedRawPrice,
+                        missingPrice: rawPriceMissing,
+                    });
+                }
+            }
+        }
+
+        // Calculate bonus revenue from essence and rare find drops
+        const bonusRevenue = bonusRevenueCalculator_js.calculateBonusRevenue(actionDetail, actionsPerHour, equipment, gameData.itemDetailMap);
+
+        // Apply efficiency multiplier to bonus revenue (efficiency repeats the action, including bonus rolls)
+        const efficiencyBoostedBonusRevenue = bonusRevenue.totalBonusRevenue * efficiencyMultiplier;
+
+        const revenuePerHour =
+            baseRevenuePerHour + gourmetRevenueBonus + processingRevenueBonus + efficiencyBoostedBonusRevenue;
+
+        const hasMissingPrices =
+            drinkCosts.some((drink) => drink.missingPrice) ||
+            baseOutputs.some((output) => output.missingPrice) ||
+            gourmetBonuses.some((output) => output.missingPrice) ||
+            processingConversions.some((conversion) => conversion.missingPrice) ||
+            (bonusRevenue?.hasMissingPrices ?? false);
+
+        // Calculate market tax (2% of gross revenue)
+        const marketTax = revenuePerHour * profitConstants_js.MARKET_TAX;
+
+        // Calculate net profit (revenue - market tax - drink costs)
+        const profitPerHour = revenuePerHour - marketTax - drinkCostPerHour;
+
+        return {
+            profitPerHour,
+            profitPerAction: profitHelpers_js.calculateProfitPerAction(profitPerHour, actionsPerHour), // Profit per action
+            profitPerDay: profitHelpers_js.calculateProfitPerDay(profitPerHour), // Profit per day
+            revenuePerHour,
+            drinkCostPerHour,
+            drinkCosts, // Array of individual drink costs {name, priceEach, costPerHour}
+            actionsPerHour, // Base actions per hour (without efficiency)
+            baseOutputs, // Display-only base outputs {name, itemsPerHour, dropRate, priceEach, revenuePerHour}
+            gourmetBonuses, // Display-only gourmet bonus outputs
+            totalEfficiency, // Total efficiency percentage
+            efficiencyMultiplier, // Efficiency as multiplier (1 + totalEfficiency / 100)
+            speedBonus,
+            bonusRevenue, // Essence and rare find details
+            gourmetBonus, // Gourmet bonus percentage
+            processingBonus, // Processing Tea chance (as decimal)
+            processingRevenueBonus, // Extra revenue from Processing conversions
+            processingConversions, // Array of conversion details {rawItem, processedItem, valueGain}
+            processingRevenueBonusPerAction, // Processing bonus per action
+            gourmetRevenueBonus, // Gourmet bonus revenue per hour
+            gourmetRevenueBonusPerAction, // Gourmet bonus revenue per action
+            gatheringQuantity: totalGathering, // Total gathering quantity bonus (as decimal) - renamed for display consistency
+            totalGathering, // Alias used by formatProfitDisplay
+            hasMissingPrices,
+            // Top-level gathering breakdown for formatProfitDisplay
+            gatheringTea,
+            communityGathering,
+            achievementGathering,
+            personalGathering,
+            details: {
+                levelEfficiency,
+                houseEfficiency,
+                teaEfficiency,
+                equipmentEfficiency,
+                equipmentEfficiencyItems,
+                achievementEfficiency,
+                personalEfficiency,
+                gourmetBonus,
+                communityBuffQuantity: communityGathering, // Community Buff component (as decimal)
+                gatheringTeaBonus: gatheringTea, // Gathering Tea component (as decimal)
+                achievementGathering: achievementGathering, // Achievement Tier component (as decimal)
+                personalGathering: personalGathering, // Personal buff (seal) component (as decimal)
+            },
+        };
+    }
+
+    /**
+     * Production Profit Calculator
+     *
+     * Calculates comprehensive profit/hour for production actions (Brewing, Cooking, Crafting, Tailoring, Cheesesmithing)
+     * Reuses existing profit calculator from tooltip system.
+     */
+
+
+    /**
+     * Action types for production skills (5 skills)
+     */
+    const PRODUCTION_TYPES = [
+        '/action_types/brewing',
+        '/action_types/cooking',
+        '/action_types/cheesesmithing',
+        '/action_types/crafting',
+        '/action_types/tailoring',
+    ];
+
+    /**
+     * Calculate comprehensive profit for a production action
+     * @param {string} actionHrid - Action HRID (e.g., "/actions/brewing/efficiency_tea")
+     * @returns {Object|null} Profit data or null if not applicable
+     */
+    async function calculateProductionProfit(actionHrid) {
+        const gameData = dataManager.getInitClientData();
+        const actionDetail = gameData.actionDetailMap[actionHrid];
+
+        if (!actionDetail) {
+            return null;
+        }
+
+        // Only process production actions with outputs
+        if (!PRODUCTION_TYPES.includes(actionDetail.type)) {
+            return null;
+        }
+
+        if (!actionDetail.outputItems || actionDetail.outputItems.length === 0) {
+            return null; // No output - nothing to calculate
+        }
+
+        // Note: Market API is pre-loaded by caller (max-produceable.js)
+        // No need to check or fetch here
+
+        // Get output item HRID
+        const outputItemHrid = actionDetail.outputItems[0].itemHrid;
+
+        // Reuse existing profit calculator (does all the heavy lifting)
+        const profitData = await profitCalculator.calculateProfit(outputItemHrid);
+
+        if (!profitData) {
+            return null;
+        }
+
+        return profitData;
+    }
+
+    /**
+     * Task Profit Calculator
+     * Calculates total profit for gathering and production tasks
+     * Includes task rewards (coins, task tokens, Purple's Gift) + action profit
+     */
+
+
+    /**
+     * Calculate Task Token value from Task Shop items
+     * Uses same approach as Ranged Way Idle - find best Task Shop item
+     * @returns {Object} Token value breakdown or error state
+     */
+    function calculateTaskTokenValue() {
+        // Return error state if expected value calculator isn't ready
+        if (!expectedValueCalculator.isInitialized) {
+            return {
+                tokenValue: null,
+                giftPerTask: null,
+                totalPerToken: null,
+                error: 'Market data not loaded',
+            };
+        }
+
+        const taskShopItems = [
+            '/items/large_meteorite_cache',
+            '/items/large_artisans_crate',
+            '/items/large_treasure_chest',
+        ];
+
+        // Get expected value of each Task Shop item (all cost 30 tokens)
+        const expectedValues = taskShopItems.map((itemHrid) => {
+            const result = expectedValueCalculator.calculateExpectedValue(itemHrid);
+            if (!result) {
+                console.warn(`[TaskProfit] Expected value returned null for task shop item: ${itemHrid}`);
+            }
+            return result?.expectedValue || 0;
+        });
+
+        // Use best (highest value) item
+        const bestValue = Math.max(...expectedValues);
+
+        // Task Token value = best chest value / 30 (cost in tokens)
+        const taskTokenValue = bestValue / 30;
+
+        // Calculate Purple's Gift prorated value (divide by 50 tasks)
+        const giftResult = expectedValueCalculator.calculateExpectedValue('/items/purples_gift');
+        if (!giftResult) {
+            console.warn('[TaskProfit] Expected value returned null for /items/purples_gift');
+        }
+        const giftValue = giftResult?.expectedValue || 0;
+        const giftPerTask = giftValue / 50;
+
+        return {
+            tokenValue: taskTokenValue,
+            giftPerTask: giftPerTask,
+            totalPerToken: taskTokenValue + giftPerTask,
+            error: null,
+        };
+    }
+
+    /**
+     * Calculate task reward value (coins + tokens + Purple's Gift)
+     * @param {number} coinReward - Coin reward amount
+     * @param {number} taskTokenReward - Task token reward amount
+     * @returns {Object} Reward value breakdown
+     */
+    function calculateTaskRewardValue(coinReward, taskTokenReward) {
+        const tokenData = calculateTaskTokenValue();
+
+        // Handle error state (market data not loaded)
+        if (tokenData.error) {
+            return {
+                coins: coinReward,
+                taskTokens: 0,
+                purpleGift: 0,
+                total: coinReward,
+                breakdown: {
+                    tokenValue: 0,
+                    tokensReceived: taskTokenReward,
+                    giftPerTask: 0,
+                },
+                error: tokenData.error,
+            };
+        }
+
+        const taskTokenValue = taskTokenReward * tokenData.tokenValue;
+        const purpleGiftValue = taskTokenReward * tokenData.giftPerTask;
+
+        return {
+            coins: coinReward,
+            taskTokens: taskTokenValue,
+            purpleGift: purpleGiftValue,
+            total: coinReward + taskTokenValue + purpleGiftValue,
+            breakdown: {
+                tokenValue: tokenData.tokenValue,
+                tokensReceived: taskTokenReward,
+                giftPerTask: tokenData.giftPerTask,
+            },
+            error: null,
+        };
+    }
+
+    /**
+     * Detect task type from description
+     * @param {string} taskDescription - Task description text (e.g., "Cheesesmithing - Holy Cheese")
+     * @returns {string} Task type: 'gathering', 'production', 'combat', or 'unknown'
+     */
+    function detectTaskType(taskDescription) {
+        // Extract skill from "Skill - Action" format
+        const skillMatch = taskDescription.match(/^([^-]+)\s*-/);
+        if (!skillMatch) return 'unknown';
+
+        const skill = skillMatch[1].trim().toLowerCase();
+
+        // Gathering skills
+        if (['foraging', 'woodcutting', 'milking'].includes(skill)) {
+            return 'gathering';
+        }
+
+        // Production skills
+        if (['cheesesmithing', 'brewing', 'cooking', 'crafting', 'tailoring'].includes(skill)) {
+            return 'production';
+        }
+
+        // Combat
+        if (skill === 'defeat') {
+            return 'combat';
+        }
+
+        return 'unknown';
+    }
+
+    /**
+     * Parse task description to extract action HRID
+     * Format: "Skill - Action Name" (e.g., "Cheesesmithing - Holy Cheese", "Milking - Cow")
+     * @param {string} taskDescription - Task description text
+     * @param {string} taskType - Task type (gathering/production)
+     * @param {number} quantity - Task quantity
+     * @param {number} currentProgress - Current progress (actions completed)
+     * @returns {Object|null} {actionHrid, quantity, currentProgress, description} or null if parsing fails
+     */
+    function parseTaskDescription(taskDescription, taskType, quantity, currentProgress) {
+        const gameData = dataManager.getInitClientData();
+        if (!gameData) {
+            return null;
+        }
+
+        const actionDetailMap = gameData.actionDetailMap;
+        if (!actionDetailMap) {
+            return null;
+        }
+
+        // Extract action name from "Skill - Action" format
+        const match = taskDescription.match(/^[^-]+\s*-\s*(.+)$/);
+        if (!match) {
+            return null;
+        }
+
+        const actionName = match[1].trim();
+
+        // Find matching action HRID by searching for action name in action details
+        for (const [actionHrid, actionDetail] of Object.entries(actionDetailMap)) {
+            if (actionDetail.name && actionDetail.name.toLowerCase() === actionName.toLowerCase()) {
+                return { actionHrid, quantity, currentProgress, description: taskDescription };
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Calculate gathering task profit
+     * @param {string} actionHrid - Action HRID
+     * @param {number} quantity - Number of times to perform action
+     * @returns {Promise<Object>} Profit breakdown
+     */
+    async function calculateGatheringTaskProfit(actionHrid, quantity) {
+        let profitData;
+        try {
+            profitData = await calculateGatheringProfit(actionHrid);
+        } catch {
+            profitData = null;
+        }
+
+        if (!profitData) {
+            return {
+                totalValue: 0,
+                breakdown: {
+                    actionHrid,
+                    quantity,
+                    perAction: 0,
+                },
+            };
+        }
+
+        const hasMissingPrices = profitData.hasMissingPrices;
+
+        const totals = profitHelpers_js.calculateGatheringActionTotalsFromBase({
+            actionsCount: quantity,
+            actionsPerHour: profitData.actionsPerHour,
+            baseOutputs: profitData.baseOutputs,
+            bonusDrops: profitData.bonusRevenue?.bonusDrops || [],
+            processingRevenueBonusPerAction: profitData.processingRevenueBonusPerAction,
+            gourmetRevenueBonusPerAction: profitData.gourmetRevenueBonusPerAction,
+            drinkCostPerHour: profitData.drinkCostPerHour,
+            efficiencyMultiplier: profitData.efficiencyMultiplier || 1,
+        });
+
+        return {
+            totalValue: hasMissingPrices ? null : totals.totalProfit,
+            hasMissingPrices,
+            breakdown: {
+                actionHrid,
+                quantity,
+                perAction: quantity > 0 ? totals.totalProfit / quantity : 0,
+            },
+            // Include detailed data for expandable display
+            details: {
+                profitPerHour: profitData.profitPerHour,
+                actionsPerHour: profitData.actionsPerHour,
+                baseOutputs: profitData.baseOutputs,
+                gourmetBonuses: profitData.gourmetBonuses,
+                bonusRevenue: profitData.bonusRevenue,
+                processingConversions: profitData.processingConversions,
+                processingRevenueBonusPerAction: profitData.processingRevenueBonusPerAction,
+                processingBonus: profitData.processingBonus,
+                gourmetRevenueBonusPerAction: profitData.gourmetRevenueBonusPerAction,
+                gourmetBonus: profitData.gourmetBonus,
+                efficiencyMultiplier: profitData.efficiencyMultiplier,
+            },
+        };
+    }
+
+    /**
+     * Calculate production task profit
+     * @param {string} actionHrid - Action HRID
+     * @param {number} quantity - Number of times to perform action
+     * @returns {Promise<Object>} Profit breakdown
+     */
+    async function calculateProductionTaskProfit(actionHrid, quantity) {
+        let profitData;
+        try {
+            profitData = await calculateProductionProfit(actionHrid);
+        } catch {
+            profitData = null;
+        }
+
+        if (!profitData) {
+            return {
+                totalProfit: 0,
+                breakdown: {
+                    actionHrid,
+                    quantity,
+                    outputValue: 0,
+                    materialCost: 0,
+                    perAction: 0,
+                },
+            };
+        }
+
+        const hasMissingPrices = profitData.hasMissingPrices;
+
+        const bonusDrops = profitData.bonusRevenue?.bonusDrops || [];
+        const totals = profitHelpers_js.calculateProductionActionTotalsFromBase({
+            actionsCount: quantity,
+            actionsPerHour: profitData.actionsPerHour,
+            outputAmount: profitData.outputAmount || 1,
+            outputPrice: profitData.outputPrice,
+            gourmetBonus: profitData.gourmetBonus || 0,
+            bonusDrops,
+            materialCosts: profitData.materialCosts,
+            totalTeaCostPerHour: profitData.totalTeaCostPerHour,
+            efficiencyMultiplier: profitData.efficiencyMultiplier || 1,
+        });
+
+        return {
+            totalProfit: hasMissingPrices ? null : totals.totalProfit,
+            hasMissingPrices,
+            breakdown: {
+                actionHrid,
+                quantity,
+                outputValue: totals.totalBaseRevenue + totals.totalGourmetRevenue,
+                materialCost: totals.totalMaterialCost + totals.totalTeaCost,
+                perAction: quantity > 0 ? totals.totalProfit / quantity : 0,
+            },
+            // Include detailed data for expandable display
+            details: {
+                profitPerHour: profitData.profitPerHour,
+                materialCosts: profitData.materialCosts,
+                teaCosts: profitData.teaCosts,
+                outputAmount: profitData.outputAmount,
+                itemName: profitData.itemName,
+                itemHrid: profitData.itemHrid,
+                gourmetBonus: profitData.gourmetBonus,
+                priceEach: profitData.outputPrice,
+                outputPriceMissing: profitData.outputPriceMissing,
+                actionsPerHour: profitData.actionsPerHour,
+                efficiencyMultiplier: profitData.efficiencyMultiplier || 1,
+                bonusRevenue: profitData.bonusRevenue, // Pass through bonus revenue data
+            },
+        };
+    }
+
+    /**
+     * Calculate complete task profit
+     * @param {Object} taskData - Task data {description, coinReward, taskTokenReward}
+     * @returns {Promise<Object|null>} Complete profit breakdown or null for combat/unknown tasks
+     */
+    async function calculateTaskProfit(taskData) {
+        const taskType = detectTaskType(taskData.description);
+
+        // Skip combat tasks entirely
+        if (taskType === 'combat') {
+            return null;
+        }
+
+        // Parse task details
+        const taskInfo = parseTaskDescription(taskData.description, taskType, taskData.quantity, taskData.currentProgress);
+        if (!taskInfo) {
+            // Return error state for UI to display "Unable to calculate"
+            return {
+                type: taskType,
+                error: 'Unable to parse task description',
+                totalProfit: 0,
+            };
+        }
+
+        // Calculate task rewards
+        const rewardValue = calculateTaskRewardValue(taskData.coinReward, taskData.taskTokenReward);
+
+        // Calculate action profit based on task type
+        let actionProfit = null;
+        if (taskType === 'gathering') {
+            actionProfit = await calculateGatheringTaskProfit(taskInfo.actionHrid, taskInfo.quantity);
+        } else if (taskType === 'production') {
+            actionProfit = await calculateProductionTaskProfit(taskInfo.actionHrid, taskInfo.quantity);
+        }
+
+        if (!actionProfit) {
+            return {
+                type: taskType,
+                error: 'Unable to calculate action profit',
+                totalProfit: 0,
+            };
+        }
+
+        // Calculate total profit
+        const actionValue = taskType === 'production' ? actionProfit.totalProfit : actionProfit.totalValue;
+        const hasMissingPrices = actionProfit.hasMissingPrices;
+        const totalProfit = hasMissingPrices ? null : rewardValue.total + actionValue;
+
+        return {
+            type: taskType,
+            totalProfit,
+            hasMissingPrices,
+            rewards: rewardValue,
+            action: actionProfit,
+            taskInfo: taskInfo,
+        };
+    }
+
+    /**
+     * Task Profit Display
+     * Shows profit calculation on task cards
+     * Expandable breakdown on click
+     */
+
+
+    // Compiled regex pattern (created once, reused for performance)
+    const REGEX_TASK_PROGRESS = /(\d+)\s*\/\s*(\d+)/;
+    const RATING_MODE_TOKENS = 'tokens';
+    const RATING_MODE_GOLD = 'gold';
+
+    /**
+     * Calculate task completion time in seconds based on task progress and action rates
+     * @param {Object} profitData - Profit calculation result
+     * @returns {number|null} Completion time in seconds or null if unavailable
+     */
+    function calculateTaskCompletionSeconds(profitData) {
+        const actionsPerHour = profitData?.action?.details?.actionsPerHour;
+        const totalQuantity = profitData?.taskInfo?.quantity;
+
+        if (!actionsPerHour || !totalQuantity) {
+            return null;
+        }
+
+        const currentProgress = profitData.taskInfo.currentProgress || 0;
+        const remainingActions = Math.max(totalQuantity - currentProgress, 0);
+        if (remainingActions <= 0) {
+            return 0;
+        }
+
+        const efficiencyMultiplier = profitData.action.details.efficiencyMultiplier || 1;
+        const baseActionsNeeded = Math.ceil(remainingActions / (efficiencyMultiplier > 0 ? efficiencyMultiplier : 1));
+
+        return profitHelpers_js.calculateSecondsForActions(baseActionsNeeded, actionsPerHour);
+    }
+
+    /**
+     * Calculate task efficiency rating data
+     * @param {Object} profitData - Profit calculation result
+     * @param {string} ratingMode - Rating mode (tokens or gold)
+     * @returns {Object|null} Rating data or null if unavailable
+     */
+    function calculateTaskEfficiencyRating(profitData, ratingMode) {
+        const completionSeconds = calculateTaskCompletionSeconds(profitData);
+        if (!completionSeconds || completionSeconds <= 0) {
+            return null;
+        }
+
+        const hours = completionSeconds / 3600;
+
+        if (ratingMode === RATING_MODE_GOLD) {
+            if (profitData.rewards?.error || profitData.totalProfit === null || profitData.totalProfit === undefined) {
+                return {
+                    value: null,
+                    unitLabel: 'gold/hr',
+                    error: profitData.rewards?.error || 'Missing price data',
+                };
+            }
+
+            return {
+                value: profitData.totalProfit / hours,
+                unitLabel: 'gold/hr',
+                error: null,
+            };
+        }
+
+        const tokensReceived = profitData.rewards?.breakdown?.tokensReceived ?? 0;
+        return {
+            value: tokensReceived / hours,
+            unitLabel: 'tokens/hr',
+            error: null,
+        };
+    }
+
+    const HEX_COLOR_PATTERN = /^#?[0-9a-f]{6}$/i;
+
+    /**
+     * Convert a hex color to RGB
+     * @param {string} hex - Hex color string
+     * @returns {Object|null} RGB values or null when invalid
+     */
+    function parseHexColor(hex) {
+        if (!hex || !HEX_COLOR_PATTERN.test(hex)) {
+            return null;
+        }
+
+        const normalized = hex.startsWith('#') ? hex.slice(1) : hex;
+        return {
+            r: Number.parseInt(normalized.slice(0, 2), 16),
+            g: Number.parseInt(normalized.slice(2, 4), 16),
+            b: Number.parseInt(normalized.slice(4, 6), 16),
+        };
+    }
+
+    /**
+     * Convert RGB values to a CSS color string
+     * @param {Object} rgb - RGB values
+     * @returns {string} CSS rgb color string
+     */
+    function formatRgbColor({ r, g, b }) {
+        return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    /**
+     * Interpolate between two RGB colors
+     * @param {Object} startColor - RGB start color
+     * @param {Object} endColor - RGB end color
+     * @param {number} ratio - Interpolation ratio
+     * @returns {Object} RGB color
+     */
+    function interpolateRgbColor(startColor, endColor, ratio) {
+        return {
+            r: Math.round(startColor.r + (endColor.r - startColor.r) * ratio),
+            g: Math.round(startColor.g + (endColor.g - startColor.g) * ratio),
+            b: Math.round(startColor.b + (endColor.b - startColor.b) * ratio),
+        };
+    }
+
+    /**
+     * Convert a rating value into a relative gradient color
+     * @param {number} value - Rating value
+     * @param {number} minValue - Minimum rating value
+     * @param {number} maxValue - Maximum rating value
+     * @param {string} minColor - CSS color for lowest value
+     * @param {string} maxColor - CSS color for highest value
+     * @param {string} fallbackColor - Color to use when value is invalid
+     * @returns {string} CSS color value
+     */
+    function getRelativeEfficiencyGradientColor(value, minValue, maxValue, minColor, maxColor, fallbackColor) {
+        if (!Number.isFinite(value) || !Number.isFinite(minValue) || !Number.isFinite(maxValue) || maxValue <= minValue) {
+            return fallbackColor;
+        }
+
+        const startColor = parseHexColor(minColor);
+        const endColor = parseHexColor(maxColor);
+        if (!startColor || !endColor) {
+            return fallbackColor;
+        }
+
+        const normalized = (value - minValue) / (maxValue - minValue);
+        const clamped = Math.min(Math.max(normalized, 0), 1);
+        const blendedColor = interpolateRgbColor(startColor, endColor, clamped);
+        return formatRgbColor(blendedColor);
+    }
+
+    /**
+     * TaskProfitDisplay class manages task profit UI
+     */
+    class TaskProfitDisplay {
+        constructor() {
+            this.isActive = false;
+            this.unregisterHandlers = []; // Store unregister functions
+            this.retryHandler = null; // Retry handler reference for cleanup
+            this.marketDataRetryHandler = null; // Market data retry handler
+            this.pendingTaskNodes = new Set(); // Track task nodes waiting for data
+            this.eventListeners = new WeakMap(); // Store listeners for cleanup
+            this.isInitialized = false;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.marketDataInitPromise = null; // Guard against duplicate market data inits
+        }
+
+        /**
+         * Setup settings listeners for feature toggle and color changes
+         */
+        setupSettingListener() {
+            config.onSettingChange('taskProfitCalculator', (value) => {
+                if (value) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+
+            config.onSettingChange('taskEfficiencyRating', () => {
+                if (this.isInitialized) {
+                    this.updateTaskProfits(true);
+                }
+            });
+
+            config.onSettingChange('taskEfficiencyRatingMode', () => {
+                if (this.isInitialized) {
+                    this.updateTaskProfits(true);
+                }
+            });
+
+            config.onSettingChange('taskEfficiencyGradient', () => {
+                if (this.isInitialized) {
+                    this.updateEfficiencyGradientColors();
+                }
+            });
+
+            config.onSettingChange('color_accent', () => {
+                if (this.isInitialized) {
+                    this.refresh();
+                }
+            });
+        }
+
+        /**
+         * Initialize task profit display
+         */
+        initialize() {
+            // Guard FIRST (before feature check)
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('taskProfitCalculator') && !config.getSetting('taskGoMerge')) {
+                return;
+            }
+
+            // Set up retry handler for when game data loads
+            if (!dataManager.getInitClientData()) {
+                if (!this.retryHandler) {
+                    this.retryHandler = () => {
+                        // Retry all pending task nodes
+                        this.retryPendingTasks();
+                    };
+                    dataManager.on('character_initialized', this.retryHandler);
+                }
+            }
+
+            // Set up retry handler for when market data loads
+            if (!this.marketDataRetryHandler) {
+                this.marketDataRetryHandler = () => {
+                    // Retry all pending task nodes when market data becomes available
+                    this.retryPendingTasks();
+                };
+                dataManager.on('expected_value_initialized', this.marketDataRetryHandler);
+            }
+
+            // Register WebSocket listener for task updates
+            this.registerWebSocketListeners();
+
+            // Register DOM observers for task panel appearance
+            this.registerDOMObservers();
+
+            // Initial update
+            this.updateTaskProfits();
+
+            this.isActive = true;
+            this.isInitialized = true;
+        }
+
+        /**
+         * Register WebSocket message listeners
+         */
+        registerWebSocketListeners() {
+            const questsHandler = (data) => {
+                if (!data.endCharacterQuests) return;
+
+                // Wait for game to update DOM before recalculating profits
+                const updateTimeout = setTimeout(() => {
+                    this.updateTaskProfits();
+                }, 250);
+                this.timerRegistry.registerTimeout(updateTimeout);
+            };
+
+            webSocketHook.on('quests_updated', questsHandler);
+
+            this.unregisterHandlers.push(() => {
+                webSocketHook.off('quests_updated', questsHandler);
+            });
+        }
+
+        /**
+         * Register DOM observers
+         */
+        registerDOMObservers() {
+            // Watch for task list appearing
+            const unregisterTaskList = domObserver.onClass('TaskProfitDisplay-TaskList', 'TasksPanel_taskList', () => {
+                this.updateTaskProfits();
+            });
+            this.unregisterHandlers.push(unregisterTaskList);
+
+            // Watch for individual tasks appearing
+            const unregisterTask = domObserver.onClass('TaskProfitDisplay-Task', 'RandomTask_randomTask', (taskNode) => {
+                this._setupTaskNode(taskNode);
+            });
+            this.unregisterHandlers.push(unregisterTask);
+
+            // Initial scan for task nodes already in the DOM (handles race condition
+            // where tasks render before observer registers)
+            const existingTaskNodes = document.querySelectorAll('[class*="RandomTask_randomTask"]');
+            for (const taskNode of existingTaskNodes) {
+                this._setupTaskNode(taskNode);
+            }
+        }
+
+        /**
+         * Set up a task node with profit display and Go button merge handler
+         * @param {HTMLElement} taskNode
+         */
+        _setupTaskNode(taskNode) {
+            // Small delay to let task data settle
+            const taskTimeout = setTimeout(() => this.updateTaskProfits(), 100);
+            this.timerRegistry.registerTimeout(taskTimeout);
+
+            // Merge duplicate task Go buttons: sum goalCount - currentCount across all
+            // in-progress tasks with the same actionHrid/monsterHrid and overwrite the input
+            const goBtn = taskNode.querySelector('button.Button_success__6d6kU');
+            if (goBtn) {
+                // Skip if already attached
+                if (goBtn.dataset.mwiGoMerge) return;
+                goBtn.dataset.mwiGoMerge = '1';
+
+                goBtn.addEventListener(
+                    'click',
+                    () => {
+                        if (!config.getSetting('taskGoMerge')) return;
+
+                        // Extract the quest for this task card from the fiber tree
+                        const rootEl = document.getElementById('root');
+                        const rootFiber =
+                            rootEl?._reactRootContainer?.current || rootEl?._reactRootContainer?._internalRoot?.current;
+                        if (!rootFiber) return;
+
+                        function walk(fiber, target) {
+                            if (!fiber) return null;
+                            if (fiber.stateNode === target) return fiber;
+                            return walk(fiber.child, target) || walk(fiber.sibling, target);
+                        }
+
+                        const btnFiber = walk(rootFiber, goBtn);
+                        if (!btnFiber) return;
+
+                        let f = btnFiber.return;
+                        let thisQuest = null;
+                        while (f) {
+                            if (f.memoizedProps?.characterQuest && f.memoizedProps?.rerollRandomTaskHandler) {
+                                thisQuest = f.memoizedProps.characterQuest;
+                                break;
+                            }
+                            f = f.return;
+                        }
+                        if (!thisQuest) return;
+
+                        const hrid = thisQuest.actionHrid || thisQuest.monsterHrid;
+                        if (!hrid) return;
+
+                        const allQuests = dataManager.characterQuests || [];
+
+                        const matchingQuests = allQuests.filter(
+                            (q) =>
+                                q.status === '/quest_status/in_progress' &&
+                                q.category === '/quest_category/random_task' &&
+                                (q.actionHrid === hrid || q.monsterHrid === hrid)
+                        );
+
+                        if (matchingQuests.length <= 1) {
+                            return;
+                        }
+
+                        const total = matchingQuests.reduce((sum, q) => sum + (q.goalCount - q.currentCount), 0);
+                        const isBoss = thisQuest.monsterHrid && dataManager.isBossMonster(thisQuest.monsterHrid);
+                        const adjustedTotal = isBoss ? total * 10 : total;
+
+                        // Wait for the game to navigate and render the input field
+                        setTimeout(() => {
+                            const inputEl = actionPanelHelper_js.findActionInput(document);
+                            if (inputEl) {
+                                reactInput_js.setReactInputValue(inputEl, adjustedTotal);
+                            }
+                        }, 300);
+                    },
+                    true
+                );
+            }
+        }
+
+        /**
+         * Update all task profit displays
+         */
+        updateTaskProfits(forceRefresh = false) {
+            if (!config.getSetting('taskProfitCalculator')) {
+                return;
+            }
+
+            const taskListNode = document.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskListNode) return;
+
+            const taskNodes = taskListNode.querySelectorAll(selectors_js.GAME.TASK_INFO);
+            for (const taskNode of taskNodes) {
+                // Get current task description to detect changes
+                const taskData = this.parseTaskData(taskNode);
+                if (!taskData) continue;
+
+                const currentTaskKey = `${taskData.description}|${taskData.quantity}`;
+
+                // Check if already processed
+                const existingProfit = taskNode.querySelector(selectors_js.TOOLASHA.TASK_PROFIT);
+                if (existingProfit) {
+                    // Check if task has changed (rerolled)
+                    const savedTaskKey = existingProfit.dataset.taskKey;
+                    if (!forceRefresh && savedTaskKey === currentTaskKey) {
+                        continue; // Same task, skip
+                    }
+
+                    // Task changed - clean up event listeners before removing
+                    const listeners = this.eventListeners.get(existingProfit);
+                    if (listeners) {
+                        listeners.forEach((listener, element) => {
+                            element.removeEventListener('click', listener);
+                        });
+                        this.eventListeners.delete(existingProfit);
+                    }
+
+                    // Remove ALL old profit displays (visible + hidden markers)
+                    taskNode.querySelectorAll(selectors_js.TOOLASHA.TASK_PROFIT).forEach((el) => el.remove());
+                }
+
+                this.addProfitToTask(taskNode);
+            }
+        }
+
+        /**
+         * Retry processing pending task nodes after data becomes available
+         */
+        retryPendingTasks() {
+            if (!dataManager.getInitClientData()) {
+                return; // Data still not ready
+            }
+
+            // Remove retry handler - we're ready now
+            if (this.retryHandler) {
+                dataManager.off('character_initialized', this.retryHandler);
+                this.retryHandler = null;
+            }
+
+            // Process all pending tasks
+            const pendingNodes = Array.from(this.pendingTaskNodes);
+            this.pendingTaskNodes.clear();
+
+            this.timerRegistry.clearAll();
+
+            for (const taskNode of pendingNodes) {
+                // Check if node still exists in DOM
+                if (document.contains(taskNode)) {
+                    this.addProfitToTask(taskNode);
+                }
+            }
+        }
+
+        /**
+         * Ensure expected value calculator is initialized when task profits need market data
+         * @returns {Promise<boolean>} True if initialization completed
+         */
+        async ensureMarketDataInitialized() {
+            if (expectedValueCalculator.isInitialized) {
+                return true;
+            }
+
+            if (!this.marketDataInitPromise) {
+                this.marketDataInitPromise = (async () => {
+                    try {
+                        return await expectedValueCalculator.initialize();
+                    } catch (error) {
+                        console.error('[Task Profit Display] Market data initialization failed:', error);
+                        return false;
+                    } finally {
+                        this.marketDataInitPromise = null;
+                    }
+                })();
+            }
+
+            return this.marketDataInitPromise;
+        }
+
+        /**
+         * Add profit display to a task card
+         * @param {Element} taskNode - Task card DOM element
+         */
+        async addProfitToTask(taskNode) {
+            try {
+                // Check if game data is ready
+                if (!dataManager.getInitClientData()) {
+                    // Game data not ready - add to pending queue
+                    this.pendingTaskNodes.add(taskNode);
+                    return;
+                }
+
+                // Double-check we haven't already processed this task
+                // (check again in case another async call beat us to it)
+                if (taskNode.querySelector(selectors_js.TOOLASHA.TASK_PROFIT)) {
+                    return;
+                }
+
+                // Parse task data from DOM
+                const taskData = this.parseTaskData(taskNode);
+                if (!taskData) {
+                    return;
+                }
+
+                if (!expectedValueCalculator.isInitialized) {
+                    const initialized = await this.ensureMarketDataInitialized();
+                    if (!initialized || !expectedValueCalculator.isInitialized) {
+                        this.pendingTaskNodes.add(taskNode);
+                        this.displayLoadingState(taskNode, taskData);
+                        return;
+                    }
+                }
+
+                // Calculate profit
+                const profitData = await calculateTaskProfit(taskData);
+
+                // Don't show anything for combat tasks, but mark them so we detect rerolls
+                if (profitData === null) {
+                    // Add hidden marker for combat tasks to enable reroll detection
+                    const combatMarker = document.createElement('div');
+                    combatMarker.className = 'mwi-task-profit';
+                    combatMarker.style.display = 'none';
+                    combatMarker.dataset.taskKey = `${taskData.description}|${taskData.quantity}`;
+
+                    const actionNode = taskNode.querySelector(selectors_js.GAME.TASK_ACTION);
+                    if (actionNode) {
+                        actionNode.appendChild(combatMarker);
+                    }
+                    return;
+                }
+
+                // Handle market data not loaded - add to pending queue
+                if (
+                    profitData.error === 'Market data not loaded' ||
+                    (profitData.rewards && profitData.rewards.error === 'Market data not loaded')
+                ) {
+                    // Add to pending queue
+                    this.pendingTaskNodes.add(taskNode);
+
+                    // Show loading state instead of error
+                    this.displayLoadingState(taskNode, taskData);
+                    return;
+                }
+
+                // Check one more time before adding (another async call might have added it)
+                if (taskNode.querySelector(selectors_js.TOOLASHA.TASK_PROFIT)) {
+                    return;
+                }
+
+                // Display profit
+                this.displayTaskProfit(taskNode, profitData);
+            } catch (error) {
+                console.error('[Task Profit Display] Failed to calculate profit:', error);
+
+                // Display error state in UI
+                this.displayErrorState(taskNode, 'Unable to calculate profit');
+
+                // Remove from pending queue if present
+                this.pendingTaskNodes.delete(taskNode);
+            }
+        }
+
+        /**
+         * Parse task data from DOM
+         * @param {Element} taskNode - Task card DOM element
+         * @returns {Object|null} {description, coinReward, taskTokenReward, quantity}
+         */
+        parseTaskData(taskNode) {
+            // Get task description
+            const nameNode = taskNode.querySelector(selectors_js.GAME.TASK_NAME_DIV);
+            if (!nameNode) return null;
+
+            const description = nameNode.textContent.trim();
+
+            // Get quantity from progress (plain div with text "Progress: 0 / 1562")
+            // Find all divs in taskInfo and look for the one containing "Progress:"
+            let quantity = 0;
+            let currentProgress = 0;
+            const taskInfoDivs = taskNode.querySelectorAll('div');
+            for (const div of taskInfoDivs) {
+                const text = div.textContent.trim();
+                if (text.startsWith('Progress:')) {
+                    const match = text.match(REGEX_TASK_PROGRESS);
+                    if (match) {
+                        currentProgress = parseInt(match[1]); // Current progress
+                        quantity = parseInt(match[2]); // Total quantity
+                    }
+                    break;
+                }
+            }
+
+            // Get rewards
+            const rewardsNode = taskNode.querySelector(selectors_js.GAME.TASK_REWARDS);
+            if (!rewardsNode) return null;
+
+            let coinReward = 0;
+            let taskTokenReward = 0;
+
+            const itemContainers = rewardsNode.querySelectorAll(selectors_js.GAME.ITEM_CONTAINER);
+
+            for (const container of itemContainers) {
+                const useElement = container.querySelector('use');
+                if (!useElement) continue;
+
+                const href = useElement.href.baseVal;
+
+                if (href.includes('coin')) {
+                    const countNode = container.querySelector(selectors_js.GAME.ITEM_COUNT);
+                    if (countNode) {
+                        coinReward = this.parseItemCount(countNode.textContent);
+                    }
+                } else if (href.includes('task_token')) {
+                    const countNode = container.querySelector(selectors_js.GAME.ITEM_COUNT);
+                    if (countNode) {
+                        taskTokenReward = this.parseItemCount(countNode.textContent);
+                    }
+                }
+            }
+
+            const taskData = {
+                description,
+                coinReward,
+                taskTokenReward,
+                quantity,
+                currentProgress,
+            };
+
+            return taskData;
+        }
+
+        /**
+         * Parse item count from text (handles K/M suffixes)
+         * @param {string} text - Count text (e.g., "1.5K")
+         * @returns {number} Parsed count
+         */
+        parseItemCount(text) {
+            text = text.trim();
+
+            if (text.includes('K')) {
+                return parseFloat(text.replace('K', '')) * 1000;
+            } else if (text.includes('M')) {
+                return parseFloat(text.replace('M', '')) * 1000000;
+            }
+
+            return parseFloat(text) || 0;
+        }
+
+        /**
+         * Display profit on task card
+         * @param {Element} taskNode - Task card DOM element
+         * @param {Object} profitData - Profit calculation result
+         */
+        displayTaskProfit(taskNode, profitData) {
+            const actionNode = taskNode.querySelector(selectors_js.GAME.TASK_ACTION);
+            if (!actionNode) return;
+
+            // Create profit container
+            const profitContainer = document.createElement('div');
+            profitContainer.className = 'mwi-task-profit';
+            profitContainer.style.cssText = `
+            margin-top: 4px;
+            font-size: 0.75rem;
+        `;
+
+            // Store task key for reroll detection
+            if (profitData.taskInfo) {
+                const taskKey = `${profitData.taskInfo.description}|${profitData.taskInfo.quantity}`;
+                profitContainer.dataset.taskKey = taskKey;
+            }
+
+            // Check for error state
+            if (profitData.error) {
+                profitContainer.innerHTML = `
+                <div style="color: ${config.SCRIPT_COLOR_ALERT};">
+                    Unable to calculate profit
+                </div>
+            `;
+                actionNode.appendChild(profitContainer);
+                return;
+            }
+
+            // Calculate time estimate for task completion
+            const completionSeconds = calculateTaskCompletionSeconds(profitData);
+            const timeEstimate = completionSeconds !== null ? formatters_js.timeReadable(completionSeconds) : '???';
+
+            // Store machine-readable value for task sorter
+            if (completionSeconds !== null) {
+                profitContainer.dataset.completionSeconds = completionSeconds;
+            }
+
+            // Create main profit display (Option B format: compact with time)
+            const profitLine = document.createElement('div');
+            profitLine.style.cssText = `
+            color: ${config.COLOR_ACCENT};
+            cursor: pointer;
+            user-select: none;
+        `;
+            const totalProfitLabel = profitData.hasMissingPrices ? '-- ⚠' : formatters_js.numberFormatter(profitData.totalProfit);
+            profitLine.innerHTML = `💰 ${totalProfitLabel} | <span style="display: inline-block; margin-right: 0.25em;">⏱</span> ${timeEstimate} ▸`;
+
+            // Create breakdown section (hidden by default)
+            const breakdownSection = document.createElement('div');
+            breakdownSection.className = 'mwi-task-profit-breakdown';
+            breakdownSection.style.cssText = `
+            display: none;
+            margin-top: 6px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            font-size: 0.7rem;
+            color: #ddd;
+        `;
+
+            // Build breakdown HTML
+            breakdownSection.innerHTML = this.buildBreakdownHTML(profitData);
+
+            // Store listener references for cleanup
+            const listeners = new Map();
+
+            // Add click handlers for expandable sections
+            breakdownSection.querySelectorAll('.mwi-expandable-header').forEach((header) => {
+                const listener = (e) => {
+                    e.stopPropagation();
+                    const section = header.getAttribute('data-section');
+                    const detailSection = breakdownSection.querySelector(
+                        `.mwi-expandable-section[data-section="${section}"]`
+                    );
+
+                    if (detailSection) {
+                        const isHidden = detailSection.style.display === 'none';
+                        detailSection.style.display = isHidden ? 'block' : 'none';
+
+                        // Update arrow
+                        const currentText = header.textContent;
+                        header.textContent = currentText.replace(isHidden ? '▸' : '▾', isHidden ? '▾' : '▸');
+                    }
+                };
+
+                header.addEventListener('click', listener);
+                listeners.set(header, listener);
+            });
+
+            // Toggle breakdown on click
+            const profitLineListener = (e) => {
+                e.stopPropagation();
+                const isHidden = breakdownSection.style.display === 'none';
+                breakdownSection.style.display = isHidden ? 'block' : 'none';
+                const updatedProfitLabel = profitData.hasMissingPrices ? '-- ⚠' : formatters_js.numberFormatter(profitData.totalProfit);
+                profitLine.innerHTML = `💰 ${updatedProfitLabel} | <span style="display: inline-block; margin-right: 0.25em;">⏱</span> ${timeEstimate} ${isHidden ? '▾' : '▸'}`;
+            };
+
+            profitLine.addEventListener('click', profitLineListener);
+            listeners.set(profitLine, profitLineListener);
+
+            // Store all listeners for cleanup
+            this.eventListeners.set(profitContainer, listeners);
+
+            profitContainer.appendChild(profitLine);
+
+            profitContainer.appendChild(breakdownSection);
+
+            if (config.getSetting('taskEfficiencyRating')) {
+                const ratingMode = config.getSettingValue('taskEfficiencyRatingMode', RATING_MODE_TOKENS);
+                const ratingData = calculateTaskEfficiencyRating(profitData, ratingMode);
+                const ratingLine = document.createElement('div');
+                ratingLine.className = 'mwi-task-profit-rating';
+                ratingLine.style.cssText = 'margin-top: 2px; font-size: 0.7rem;';
+
+                if (!ratingData || ratingData.value === null) {
+                    const warningText = ratingData?.error ? ' ⚠' : '';
+                    ratingLine.style.color = config.COLOR_WARNING;
+                    ratingLine.textContent = `⚡ --${warningText} ${ratingData?.unitLabel || ''}`.trim();
+                } else {
+                    const ratingValue = formatters_js.numberFormatter(ratingData.value, 2);
+                    ratingLine.dataset.ratingValue = `${ratingData.value}`;
+                    ratingLine.dataset.ratingMode = ratingMode;
+                    ratingLine.style.color = config.COLOR_ACCENT;
+                    ratingLine.textContent = `⚡ ${ratingValue} ${ratingData.unitLabel}`;
+                }
+
+                profitContainer.appendChild(ratingLine);
+            }
+            actionNode.appendChild(profitContainer);
+
+            this.updateEfficiencyGradientColors();
+        }
+
+        /**
+         * Update efficiency rating colors based on relative performance
+         */
+        updateEfficiencyGradientColors() {
+            const ratingMode = config.getSettingValue('taskEfficiencyRatingMode', RATING_MODE_TOKENS);
+            const ratingLines = Array.from(document.querySelectorAll('.mwi-task-profit-rating')).filter((line) => {
+                return line.dataset.ratingMode === ratingMode && line.dataset.ratingValue;
+            });
+
+            if (ratingLines.length === 0) {
+                return;
+            }
+
+            const ratingValues = ratingLines
+                .map((line) => Number.parseFloat(line.dataset.ratingValue))
+                .filter((value) => Number.isFinite(value));
+
+            if (ratingValues.length === 0) {
+                return;
+            }
+
+            if (!config.getSetting('taskEfficiencyGradient')) {
+                ratingLines.forEach((line) => {
+                    line.style.color = config.COLOR_ACCENT;
+                });
+                return;
+            }
+
+            if (ratingValues.length === 1) {
+                ratingLines.forEach((line) => {
+                    line.style.color = config.COLOR_ACCENT;
+                });
+                return;
+            }
+
+            const sortedValues = [...ratingValues].sort((a, b) => a - b);
+            const lastIndex = sortedValues.length - 1;
+            const percentileLookup = new Map();
+            const resolvedPercentile = (value) => {
+                if (percentileLookup.has(value)) {
+                    return percentileLookup.get(value);
+                }
+
+                const firstIndex = sortedValues.indexOf(value);
+                const lastValueIndex = sortedValues.lastIndexOf(value);
+                const averageRank = (firstIndex + lastValueIndex) / 2;
+                const percentile = lastIndex > 0 ? averageRank / lastIndex : 1;
+                percentileLookup.set(value, percentile);
+                return percentile;
+            };
+
+            ratingLines.forEach((line) => {
+                const value = Number.parseFloat(line.dataset.ratingValue);
+                const percentile = resolvedPercentile(value);
+                line.style.color = getRelativeEfficiencyGradientColor(
+                    percentile,
+                    0,
+                    1,
+                    config.COLOR_LOSS,
+                    config.COLOR_ACCENT,
+                    config.COLOR_ACCENT
+                );
+            });
+        }
+
+        /**
+         * Build breakdown HTML
+         * @param {Object} profitData - Profit calculation result
+         * @returns {string} HTML string
+         */
+        buildBreakdownHTML(profitData) {
+            const lines = [];
+            const showTotals = !profitData.hasMissingPrices;
+            const formatTotalValue = (value) => (showTotals ? formatters_js.numberFormatter(value) : '-- ⚠');
+            const formatPerActionValue = (value) => (showTotals ? formatters_js.numberFormatter(value.toFixed(0)) : '-- ⚠');
+
+            lines.push('<div style="font-weight: bold; margin-bottom: 4px;">Task Profit Breakdown</div>');
+            lines.push('<div style="border-bottom: 1px solid #555; margin-bottom: 4px;"></div>');
+
+            // Show warning if market data unavailable
+            if (profitData.rewards.error) {
+                lines.push(
+                    `<div style="color: ${config.SCRIPT_COLOR_ALERT}; margin-bottom: 6px; font-style: italic;">⚠ ${profitData.rewards.error} - Token values unavailable</div>`
+                );
+            }
+
+            // Task Rewards section
+            lines.push('<div style="margin-bottom: 4px; color: #aaa;">Task Rewards:</div>');
+            lines.push(`<div style="margin-left: 10px;">Coins: ${formatters_js.numberFormatter(profitData.rewards.coins)}</div>`);
+
+            if (!profitData.rewards.error) {
+                lines.push(
+                    `<div style="margin-left: 10px;">Task Tokens: ${formatters_js.numberFormatter(profitData.rewards.taskTokens)}</div>`
+                );
+                lines.push(
+                    `<div style="margin-left: 20px; font-size: 0.65rem; color: #888;">(${profitData.rewards.breakdown.tokensReceived} tokens @ ${formatters_js.numberFormatter(profitData.rewards.breakdown.tokenValue.toFixed(0))} each)</div>`
+                );
+                lines.push(
+                    `<div style="margin-left: 10px;">Purple's Gift: ${formatters_js.numberFormatter(profitData.rewards.purpleGift)}</div>`
+                );
+                lines.push(
+                    `<div style="margin-left: 20px; font-size: 0.65rem; color: #888;">(${formatters_js.numberFormatter(profitData.rewards.breakdown.giftPerTask.toFixed(0))} per task)</div>`
+                );
+            } else {
+                lines.push(
+                    `<div style="margin-left: 10px; color: #888; font-style: italic;">Task Tokens: Loading...</div>`
+                );
+                lines.push(
+                    `<div style="margin-left: 10px; color: #888; font-style: italic;">Purple's Gift: Loading...</div>`
+                );
+            }
+            // Action profit section
+            lines.push('<div style="margin-top: 6px; margin-bottom: 4px; color: #aaa;">Action Profit:</div>');
+
+            if (profitData.type === 'gathering') {
+                // Gathering Value (expandable)
+                lines.push(
+                    `<div class="mwi-expandable-header" data-section="gathering" style="margin-left: 10px; cursor: pointer; user-select: none;">Gathering Value: ${formatTotalValue(profitData.action.totalValue)} ▸</div>`
+                );
+                lines.push(
+                    `<div class="mwi-expandable-section" data-section="gathering" style="display: none; margin-left: 20px; font-size: 0.65rem; color: #888; margin-top: 2px;">`
+                );
+
+                if (profitData.action.details) {
+                    const details = profitData.action.details;
+                    const quantity = profitData.action.breakdown.quantity;
+                    const actionsPerHour = details.actionsPerHour;
+
+                    // Primary output (base + gourmet + processing)
+                    if (details.baseOutputs && details.baseOutputs.length > 0) {
+                        const baseRevenueTotal = details.baseOutputs.reduce((sum, output) => {
+                            const revenuePerAction = output.revenuePerAction ?? output.revenuePerHour / actionsPerHour;
+                            return sum + revenuePerAction * quantity;
+                        }, 0);
+                        const gourmetRevenueTotal = (details.gourmetRevenueBonusPerAction || 0) * quantity;
+                        const processingRevenueTotal = (details.processingRevenueBonusPerAction || 0) * quantity;
+                        const primaryOutputTotal = baseRevenueTotal + gourmetRevenueTotal + processingRevenueTotal;
+                        lines.push(
+                            `<div style="margin-top: 2px; color: #aaa;">Primary Outputs: ${formatTotalValue(Math.round(primaryOutputTotal))}</div>`
+                        );
+                        for (const output of details.baseOutputs) {
+                            const itemsPerAction = output.itemsPerAction ?? output.itemsPerHour / actionsPerHour;
+                            const revenuePerAction = output.revenuePerAction ?? output.revenuePerHour / actionsPerHour;
+                            const itemsForTask = itemsPerAction * quantity;
+                            const revenueForTask = revenuePerAction * quantity;
+                            const dropRateText =
+                                output.dropRate < 1.0 ? ` (${formatters_js.formatPercentage(output.dropRate, 1)} drop)` : '';
+                            const missingPriceNote = output.missingPrice ? ' ⚠' : '';
+                            lines.push(
+                                `<div>• ${output.name} (Base): ${itemsForTask.toFixed(1)} items @ ${formatters_js.numberFormatter(Math.round(output.priceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(revenueForTask))}${dropRateText}</div>`
+                            );
+                        }
+                    }
+
+                    if (details.gourmetBonuses && details.gourmetBonuses.length > 0) {
+                        for (const output of details.gourmetBonuses) {
+                            const itemsPerAction = output.itemsPerAction ?? output.itemsPerHour / actionsPerHour;
+                            const revenuePerAction = output.revenuePerAction ?? output.revenuePerHour / actionsPerHour;
+                            const itemsForTask = itemsPerAction * quantity;
+                            const revenueForTask = revenuePerAction * quantity;
+                            const missingPriceNote = output.missingPrice ? ' ⚠' : '';
+                            lines.push(
+                                `<div>• ${output.name} (Gourmet ${formatters_js.formatPercentage(details.gourmetBonus || 0, 1)}): ${itemsForTask.toFixed(1)} items @ ${formatters_js.numberFormatter(Math.round(output.priceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(revenueForTask))}</div>`
+                            );
+                        }
+                    }
+
+                    if (details.processingConversions && details.processingConversions.length > 0) {
+                        const processingBonusTotal = (details.processingRevenueBonusPerAction || 0) * quantity;
+                        const processingLabel = `${processingBonusTotal >= 0 ? '+' : '-'}${formatters_js.numberFormatter(Math.abs(Math.round(processingBonusTotal)))}`;
+                        lines.push(
+                            `<div>• Processing (${formatters_js.formatPercentage(details.processingBonus || 0, 1)} proc): Net ${processingLabel}</div>`
+                        );
+
+                        for (const conversion of details.processingConversions) {
+                            const conversionsPerAction =
+                                conversion.conversionsPerAction ?? conversion.conversionsPerHour / actionsPerHour;
+                            const rawConsumedPerAction =
+                                conversion.rawConsumedPerAction ?? conversion.rawConsumedPerHour / actionsPerHour;
+                            const totalConsumed = rawConsumedPerAction * quantity;
+                            const totalProduced = conversionsPerAction * quantity;
+                            const consumedRevenue = totalConsumed * conversion.rawPriceEach;
+                            const producedRevenue = totalProduced * conversion.processedPriceEach;
+                            const missingPriceNote = conversion.missingPrice ? ' ⚠' : '';
+                            lines.push(
+                                `<div style="margin-left: 10px;">• ${conversion.rawItem} consumed: -${totalConsumed.toFixed(1)} items @ ${formatters_js.numberFormatter(Math.round(conversion.rawPriceEach))}${missingPriceNote} = -${formatters_js.numberFormatter(Math.round(consumedRevenue))}</div>`
+                            );
+                            lines.push(
+                                `<div style="margin-left: 10px;">• ${conversion.processedItem} produced: ${totalProduced.toFixed(1)} items @ ${formatters_js.numberFormatter(Math.round(conversion.processedPriceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(producedRevenue))}</div>`
+                            );
+                        }
+                    }
+
+                    // Bonus Revenue (essence and rare finds)
+                    if (
+                        details.bonusRevenue &&
+                        details.bonusRevenue.bonusDrops &&
+                        details.bonusRevenue.bonusDrops.length > 0
+                    ) {
+                        const bonusRevenue = details.bonusRevenue;
+                        const essenceDrops = bonusRevenue.bonusDrops.filter((d) => d.type === 'essence');
+                        const rareFindDrops = bonusRevenue.bonusDrops.filter((d) => d.type === 'rare_find');
+
+                        if (essenceDrops.length > 0) {
+                            const totalEssenceRevenue = essenceDrops.reduce(
+                                (sum, drop) => sum + (drop.revenuePerAction || 0) * quantity,
+                                0
+                            );
+                            lines.push(
+                                `<div style="margin-top: 4px; color: #aaa;">Essence Drops: ${formatTotalValue(Math.round(totalEssenceRevenue))}</div>`
+                            );
+                            for (const drop of essenceDrops) {
+                                const dropsForTask = (drop.dropsPerAction || 0) * quantity;
+                                const revenueForTask = (drop.revenuePerAction || 0) * quantity;
+                                const missingPriceNote = drop.missingPrice ? ' ⚠' : '';
+                                lines.push(
+                                    `<div>• ${drop.itemName}: ${dropsForTask.toFixed(2)} drops @ ${formatters_js.numberFormatter(Math.round(drop.priceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(revenueForTask))}</div>`
+                                );
+                            }
+                        }
+
+                        if (rareFindDrops.length > 0) {
+                            const totalRareRevenue = rareFindDrops.reduce(
+                                (sum, drop) => sum + (drop.revenuePerAction || 0) * quantity,
+                                0
+                            );
+                            lines.push(
+                                `<div style="margin-top: 4px; color: #aaa;">Rare Finds: ${formatTotalValue(Math.round(totalRareRevenue))}</div>`
+                            );
+                            for (const drop of rareFindDrops) {
+                                const dropsForTask = (drop.dropsPerAction || 0) * quantity;
+                                const revenueForTask = (drop.revenuePerAction || 0) * quantity;
+                                const missingPriceNote = drop.missingPrice ? ' ⚠' : '';
+                                lines.push(
+                                    `<div>• ${drop.itemName}: ${dropsForTask.toFixed(2)} drops @ ${formatters_js.numberFormatter(Math.round(drop.priceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(revenueForTask))}</div>`
+                                );
+                            }
+                        }
+                    }
+                }
+
+                lines.push(`</div>`);
+                lines.push(
+                    `<div style="margin-left: 20px; font-size: 0.65rem; color: #888;">(${profitData.action.breakdown.quantity}× @ ${formatPerActionValue(profitData.action.breakdown.perAction)} each)</div>`
+                );
+            } else if (profitData.type === 'production') {
+                const details = profitData.action.details;
+                const bonusDrops = details?.bonusRevenue?.bonusDrops || [];
+                const netProductionValue = profitData.action.totalProfit;
+
+                // Net Production (expandable)
+                lines.push(
+                    `<div class="mwi-expandable-header" data-section="production" style="margin-left: 10px; cursor: pointer; user-select: none;">Net Production: ${formatTotalValue(netProductionValue)} ▸</div>`
+                );
+                lines.push(
+                    `<div class="mwi-expandable-section" data-section="production" style="display: none; margin-left: 20px; font-size: 0.65rem; color: #888; margin-top: 2px;">`
+                );
+
+                if (details) {
+                    const outputAmount = details.outputAmount || 1;
+                    const totalItems = outputAmount * profitData.action.breakdown.quantity;
+                    const outputPriceNote = details.outputPriceMissing ? ' ⚠' : '';
+                    const baseRevenueTotal = totalItems * details.priceEach;
+                    const gourmetRevenueTotal = details.gourmetBonus
+                        ? outputAmount * details.gourmetBonus * profitData.action.breakdown.quantity * details.priceEach
+                        : 0;
+                    const primaryOutputTotal = baseRevenueTotal + gourmetRevenueTotal;
+
+                    lines.push(
+                        `<div style="margin-top: 2px; color: #aaa;">Primary Outputs: ${formatTotalValue(Math.round(primaryOutputTotal))}</div>`
+                    );
+
+                    lines.push(
+                        `<div>• ${details.itemName} (Base): ${totalItems.toFixed(1)} items @ ${formatters_js.numberFormatter(details.priceEach)}${outputPriceNote} = ${formatters_js.numberFormatter(Math.round(totalItems * details.priceEach))}</div>`
+                    );
+
+                    if (details.gourmetBonus > 0) {
+                        const bonusItems = outputAmount * details.gourmetBonus * profitData.action.breakdown.quantity;
+                        lines.push(
+                            `<div>• ${details.itemName} (Gourmet +${formatters_js.formatPercentage(details.gourmetBonus, 1)}): ${bonusItems.toFixed(1)} items @ ${formatters_js.numberFormatter(details.priceEach)}${outputPriceNote} = ${formatters_js.numberFormatter(Math.round(bonusItems * details.priceEach))}</div>`
+                        );
+                    }
+                }
+
+                if (bonusDrops.length > 0) {
+                    const essenceDrops = bonusDrops.filter((d) => d.type === 'essence');
+                    const rareFindDrops = bonusDrops.filter((d) => d.type === 'rare_find');
+
+                    if (essenceDrops.length > 0) {
+                        const totalEssenceRevenue = essenceDrops.reduce(
+                            (sum, drop) => sum + (drop.revenuePerAction || 0) * profitData.action.breakdown.quantity,
+                            0
+                        );
+                        lines.push(
+                            `<div style="margin-top: 4px; color: #aaa;">Essence Drops: ${formatTotalValue(Math.round(totalEssenceRevenue))}</div>`
+                        );
+                        for (const drop of essenceDrops) {
+                            const dropsForTask = (drop.dropsPerAction || 0) * profitData.action.breakdown.quantity;
+                            const revenueForTask = (drop.revenuePerAction || 0) * profitData.action.breakdown.quantity;
+                            const missingPriceNote = drop.missingPrice ? ' ⚠' : '';
+                            lines.push(
+                                `<div>• ${drop.itemName}: ${dropsForTask.toFixed(2)} drops @ ${formatters_js.numberFormatter(Math.round(drop.priceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(revenueForTask))}</div>`
+                            );
+                        }
+                    }
+
+                    if (rareFindDrops.length > 0) {
+                        const totalRareRevenue = rareFindDrops.reduce(
+                            (sum, drop) => sum + (drop.revenuePerAction || 0) * profitData.action.breakdown.quantity,
+                            0
+                        );
+                        lines.push(
+                            `<div style="margin-top: 4px; color: #aaa;">Rare Finds: ${formatTotalValue(Math.round(totalRareRevenue))}</div>`
+                        );
+                        for (const drop of rareFindDrops) {
+                            const dropsForTask = (drop.dropsPerAction || 0) * profitData.action.breakdown.quantity;
+                            const revenueForTask = (drop.revenuePerAction || 0) * profitData.action.breakdown.quantity;
+                            const missingPriceNote = drop.missingPrice ? ' ⚠' : '';
+                            lines.push(
+                                `<div>• ${drop.itemName}: ${dropsForTask.toFixed(2)} drops @ ${formatters_js.numberFormatter(Math.round(drop.priceEach))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(revenueForTask))}</div>`
+                            );
+                        }
+                    }
+                }
+
+                if (details?.materialCosts) {
+                    const actionsNeeded = profitData.action.breakdown.quantity;
+                    const effectiveActionsPerHour = profitHelpers_js.calculateEffectiveActionsPerHour(
+                        details.actionsPerHour,
+                        details.efficiencyMultiplier || 1
+                    );
+                    const hoursNeeded = effectiveActionsPerHour > 0 ? actionsNeeded / effectiveActionsPerHour : 0;
+                    lines.push(
+                        `<div style="margin-top: 4px; color: #aaa;">Material Costs: ${formatTotalValue(profitData.action.breakdown.materialCost)}</div>`
+                    );
+
+                    for (const mat of details.materialCosts) {
+                        const totalAmount = mat.amount * actionsNeeded;
+                        const totalCost = mat.totalCost * actionsNeeded;
+                        const missingPriceNote = mat.missingPrice ? ' ⚠' : '';
+                        lines.push(
+                            `<div>• ${mat.itemName}: ${totalAmount.toFixed(1)} @ ${formatters_js.numberFormatter(Math.round(mat.askPrice))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(totalCost))}</div>`
+                        );
+                    }
+
+                    if (details.teaCosts && details.teaCosts.length > 0) {
+                        for (const tea of details.teaCosts) {
+                            const drinksNeeded = tea.drinksPerHour * hoursNeeded;
+                            const totalCost = tea.totalCost * hoursNeeded;
+                            const missingPriceNote = tea.missingPrice ? ' ⚠' : '';
+                            lines.push(
+                                `<div>• ${tea.itemName}: ${drinksNeeded.toFixed(1)} drinks @ ${formatters_js.numberFormatter(Math.round(tea.pricePerDrink))}${missingPriceNote} = ${formatters_js.numberFormatter(Math.round(totalCost))}</div>`
+                            );
+                        }
+                    }
+                }
+
+                lines.push(`</div>`);
+
+                // Net Production now shown in header
+                lines.push(
+                    `<div style="margin-left: 20px; font-size: 0.65rem; color: #888;">(${profitData.action.breakdown.quantity}× @ ${formatPerActionValue(profitData.action.breakdown.perAction)} each)</div>`
+                );
+            }
+
+            // Total
+            lines.push('<div style="border-top: 1px solid #555; margin-top: 6px; padding-top: 4px;"></div>');
+            lines.push(
+                `<div style="font-weight: bold; color: ${config.COLOR_ACCENT};">Total Profit: ${formatTotalValue(profitData.totalProfit)}</div>`
+            );
+
+            return lines.join('');
+        }
+
+        /**
+         * Display error state when profit calculation fails
+         * @param {Element} taskNode - Task card DOM element
+         * @param {string} message - Error message to display
+         */
+        displayErrorState(taskNode, message) {
+            const actionNode = taskNode.querySelector(selectors_js.GAME.TASK_ACTION);
+            if (!actionNode) return;
+
+            // Create error container
+            const errorContainer = document.createElement('div');
+            errorContainer.className = 'mwi-task-profit mwi-task-profit-error';
+            errorContainer.style.cssText = `
+            margin-top: 4px;
+            font-size: 0.75rem;
+            color: ${config.SCRIPT_COLOR_ALERT};
+            font-style: italic;
+        `;
+            errorContainer.textContent = `⚠ ${message}`;
+
+            actionNode.appendChild(errorContainer);
+        }
+
+        /**
+         * Display loading state while waiting for market data
+         * @param {Element} taskNode - Task card DOM element
+         * @param {Object} taskData - Task data for reroll detection
+         */
+        displayLoadingState(taskNode, taskData) {
+            const actionNode = taskNode.querySelector(selectors_js.GAME.TASK_ACTION);
+            if (!actionNode) return;
+
+            // Create loading container
+            const loadingContainer = document.createElement('div');
+            loadingContainer.className = 'mwi-task-profit mwi-task-profit-loading';
+            loadingContainer.style.cssText = `
+            margin-top: 4px;
+            font-size: 0.75rem;
+            color: #888;
+            font-style: italic;
+        `;
+            loadingContainer.textContent = '⏳ Loading market data...';
+
+            // Store task key for reroll detection
+            const taskKey = `${taskData.description}|${taskData.quantity}`;
+            loadingContainer.dataset.taskKey = taskKey;
+
+            actionNode.appendChild(loadingContainer);
+        }
+
+        /**
+         * Refresh colors on existing task profit displays
+         */
+        refresh() {
+            // Update all profit line colors
+            const profitLines = document.querySelectorAll('.mwi-task-profit > div:first-child');
+            profitLines.forEach((line) => {
+                line.style.color = config.COLOR_ACCENT;
+            });
+
+            // Update all total profit colors in breakdowns
+            const totalProfits = document.querySelectorAll('.mwi-task-profit-breakdown > div:last-child');
+            totalProfits.forEach((total) => {
+                total.style.color = config.COLOR_ACCENT;
+            });
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+
+            if (this.retryHandler) {
+                dataManager.off('character_initialized', this.retryHandler);
+                this.retryHandler = null;
+            }
+
+            if (this.marketDataRetryHandler) {
+                dataManager.off('expected_value_initialized', this.marketDataRetryHandler);
+                this.marketDataRetryHandler = null;
+            }
+
+            // Clear pending tasks
+            this.pendingTaskNodes.clear();
+
+            // Clean up event listeners before removing profit displays
+            document.querySelectorAll(selectors_js.TOOLASHA.TASK_PROFIT).forEach((el) => {
+                const listeners = this.eventListeners.get(el);
+                if (listeners) {
+                    listeners.forEach((listener, element) => {
+                        element.removeEventListener('click', listener);
+                    });
+                    this.eventListeners.delete(el);
+                }
+                el.remove();
+            });
+
+            this.isActive = false;
+            this.isInitialized = false;
+        }
+    }
+
+    const taskProfitDisplay = new TaskProfitDisplay();
+    taskProfitDisplay.setupSettingListener();
+
+    /**
+     * Task Reroll Cost Tracker
+     * Tracks and displays reroll costs for tasks using WebSocket messages
+     */
+
+
+    class TaskRerollTracker {
+        constructor() {
+            this.taskRerollData = new Map(); // key: taskId, value: { coinRerollCount, cowbellRerollCount }
+            this.unregisterHandlers = [];
+            this.isInitialized = false;
+            this.storeName = 'rerollSpending';
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize the tracker
+         */
+        async initialize() {
+            if (this.isInitialized) return;
+
+            // Load saved data from IndexedDB
+            await this.loadFromStorage();
+
+            // Register WebSocket listener
+            this.registerWebSocketListeners();
+
+            // Register DOM observer for display updates
+            this.registerDOMObservers();
+
+            this.isInitialized = true;
+        }
+
+        /**
+         * Load task reroll data from IndexedDB
+         */
+        async loadFromStorage() {
+            try {
+                const savedData = await storage.getJSON('taskRerollData', this.storeName, {});
+
+                // Convert saved object back to Map
+                for (const [taskId, data] of Object.entries(savedData)) {
+                    this.taskRerollData.set(parseInt(taskId), data);
+                }
+            } catch (error) {
+                console.error('[Task Reroll Tracker] Failed to load from storage:', error);
+            }
+        }
+
+        /**
+         * Save task reroll data to IndexedDB
+         */
+        async saveToStorage() {
+            try {
+                // Convert Map to plain object for storage
+                const dataToSave = {};
+                for (const [taskId, data] of this.taskRerollData.entries()) {
+                    dataToSave[taskId] = data;
+                }
+
+                await storage.setJSON('taskRerollData', dataToSave, this.storeName, true);
+            } catch (error) {
+                console.error('[Task Reroll Tracker] Failed to save to storage:', error);
+            }
+        }
+
+        /**
+         * Clean up observers and handlers
+         */
+        cleanup() {
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+            this.timerRegistry.clearAll();
+            this.isInitialized = false;
+        }
+
+        disable() {
+            this.cleanup();
+        }
+
+        /**
+         * Clean up old task data that's no longer active
+         * Keeps only tasks that are currently in characterQuests
+         */
+        cleanupOldTasks() {
+            if (!dataManager.characterData || !dataManager.characterData.characterQuests) {
+                return;
+            }
+
+            const activeTaskIds = new Set(dataManager.characterData.characterQuests.map((quest) => quest.id));
+
+            let hasChanges = false;
+
+            // Remove tasks that are no longer active
+            for (const taskId of this.taskRerollData.keys()) {
+                if (!activeTaskIds.has(taskId)) {
+                    this.taskRerollData.delete(taskId);
+                    hasChanges = true;
+                }
+            }
+
+            if (hasChanges) {
+                this.saveToStorage();
+            }
+        }
+
+        /**
+         * Register WebSocket message listeners
+         */
+        registerWebSocketListeners() {
+            const questsHandler = (data) => {
+                if (!data.endCharacterQuests) {
+                    return;
+                }
+
+                let hasChanges = false;
+
+                // Update our task reroll data from server data
+                for (const quest of data.endCharacterQuests) {
+                    const existingData = this.taskRerollData.get(quest.id);
+                    const newCoinCount = quest.coinRerollCount || 0;
+                    const newCowbellCount = quest.cowbellRerollCount || 0;
+
+                    // Only update if counts increased or task is new
+                    if (
+                        !existingData ||
+                        newCoinCount > existingData.coinRerollCount ||
+                        newCowbellCount > existingData.cowbellRerollCount
+                    ) {
+                        this.taskRerollData.set(quest.id, {
+                            coinRerollCount: Math.max(existingData?.coinRerollCount || 0, newCoinCount),
+                            cowbellRerollCount: Math.max(existingData?.cowbellRerollCount || 0, newCowbellCount),
+                            monsterHrid: quest.monsterHrid || '',
+                            actionHrid: quest.actionHrid || '',
+                            goalCount: quest.goalCount || 0,
+                        });
+                        hasChanges = true;
+                    }
+                }
+
+                // Save to storage if data changed
+                if (hasChanges) {
+                    this.saveToStorage();
+                }
+
+                // Clean up old tasks periodically (every 10th update)
+                if (Math.random() < 0.1) {
+                    this.cleanupOldTasks();
+                }
+
+                // Wait for game to update DOM before updating displays
+                const updateTimeout = setTimeout(() => {
+                    this.updateAllTaskDisplays();
+                }, 250);
+                this.timerRegistry.registerTimeout(updateTimeout);
+            };
+
+            webSocketHook.on('quests_updated', questsHandler);
+
+            this.unregisterHandlers.push(() => {
+                webSocketHook.off('quests_updated', questsHandler);
+            });
+
+            // Load existing quest data from DataManager (which receives init_character_data early)
+            const initHandler = (data) => {
+                if (!data.characterQuests) {
+                    return;
+                }
+
+                let hasChanges = false;
+
+                // Load all quest data into the map
+                for (const quest of data.characterQuests) {
+                    const existingData = this.taskRerollData.get(quest.id);
+                    const newCoinCount = quest.coinRerollCount || 0;
+                    const newCowbellCount = quest.cowbellRerollCount || 0;
+
+                    // Only update if counts increased or task is new
+                    if (
+                        !existingData ||
+                        newCoinCount > existingData.coinRerollCount ||
+                        newCowbellCount > existingData.cowbellRerollCount
+                    ) {
+                        this.taskRerollData.set(quest.id, {
+                            coinRerollCount: Math.max(existingData?.coinRerollCount || 0, newCoinCount),
+                            cowbellRerollCount: Math.max(existingData?.cowbellRerollCount || 0, newCowbellCount),
+                            monsterHrid: quest.monsterHrid || '',
+                            actionHrid: quest.actionHrid || '',
+                            goalCount: quest.goalCount || 0,
+                        });
+                        hasChanges = true;
+                    }
+                }
+
+                // Save to storage if data changed
+                if (hasChanges) {
+                    this.saveToStorage();
+                }
+
+                // Clean up old tasks after loading character data
+                this.cleanupOldTasks();
+
+                // Wait for DOM to be ready before updating displays
+                const initTimeout = setTimeout(() => {
+                    this.updateAllTaskDisplays();
+                }, 500);
+                this.timerRegistry.registerTimeout(initTimeout);
+            };
+
+            dataManager.on('character_initialized', initHandler);
+
+            // Check if character data already loaded (in case we missed the event)
+            if (dataManager.characterData && dataManager.characterData.characterQuests) {
+                initHandler(dataManager.characterData);
+            }
+
+            this.unregisterHandlers.push(() => {
+                dataManager.off('character_initialized', initHandler);
+            });
+        }
+
+        /**
+         * Register DOM observers for display updates
+         */
+        registerDOMObservers() {
+            // Watch for task list appearing
+            const unregisterTaskList = domObserver.onClass('TaskRerollTracker-TaskList', 'TasksPanel_taskList', () => {
+                this.updateAllTaskDisplays();
+            });
+            this.unregisterHandlers.push(unregisterTaskList);
+
+            // Watch for individual tasks appearing
+            const unregisterTask = domObserver.onClass('TaskRerollTracker-Task', 'RandomTask_randomTask', () => {
+                // Small delay to let task data settle
+                const taskTimeout = setTimeout(() => this.updateAllTaskDisplays(), 100);
+                this.timerRegistry.registerTimeout(taskTimeout);
+            });
+            this.unregisterHandlers.push(unregisterTask);
+        }
+
+        /**
+         * Calculate cumulative gold spent from coin reroll count
+         * Formula: 10K, 20K, 40K, 80K, 160K, 320K (doubles, caps at 320K)
+         * @param {number} rerollCount - Number of gold rerolls
+         * @returns {number} Total gold spent
+         */
+        calculateGoldSpent(rerollCount) {
+            if (rerollCount === 0) return 0;
+
+            let total = 0;
+            let cost = 10000; // Start at 10K
+
+            for (let i = 0; i < rerollCount; i++) {
+                total += cost;
+                // Double the cost, but cap at 320K
+                cost = Math.min(cost * 2, 320000);
+            }
+
+            return total;
+        }
+
+        /**
+         * Calculate cumulative cowbells spent from cowbell reroll count
+         * Formula: 1, 2, 4, 8, 16, 32 (doubles, caps at 32)
+         * @param {number} rerollCount - Number of cowbell rerolls
+         * @returns {number} Total cowbells spent
+         */
+        calculateCowbellSpent(rerollCount) {
+            if (rerollCount === 0) return 0;
+
+            let total = 0;
+            let cost = 1; // Start at 1
+
+            for (let i = 0; i < rerollCount; i++) {
+                total += cost;
+                // Double the cost, but cap at 32
+                cost = Math.min(cost * 2, 32);
+            }
+
+            return total;
+        }
+
+        /**
+         * Get task ID from DOM element by matching task description
+         * @param {Element} taskElement - Task DOM element
+         * @returns {number|null} Task ID or null if not found
+         */
+        getTaskIdFromElement(taskElement) {
+            // Get task description and goal count from DOM
+            const nameEl = taskElement.querySelector(selectors_js.GAME.TASK_NAME);
+            const description = nameEl ? nameEl.textContent.trim() : '';
+
+            if (!description) {
+                return null;
+            }
+
+            // Get quantity from progress text
+            const progressDivs = taskElement.querySelectorAll('div');
+            let goalCount = 0;
+            for (const div of progressDivs) {
+                const text = div.textContent.trim();
+                if (text.startsWith('Progress:')) {
+                    const match = text.match(/Progress:\s*\d+\s*\/\s*(\d+)/);
+                    if (match) {
+                        goalCount = parseInt(match[1]);
+                        break;
+                    }
+                }
+            }
+
+            // Match against stored task data
+            for (const [taskId, taskData] of this.taskRerollData.entries()) {
+                // Check if goal count matches
+                if (taskData.goalCount !== goalCount) continue;
+
+                // Extract monster/action name from description
+                // Description format: "Kill X" or "Do action X times"
+                const descLower = description.toLowerCase();
+
+                // For monster tasks, check monsterHrid
+                if (taskData.monsterHrid) {
+                    const monsterName = taskData.monsterHrid.replace('/monsters/', '').replace(/_/g, ' ');
+                    if (descLower.includes(monsterName.toLowerCase())) {
+                        return taskId;
+                    }
+                }
+
+                // For action tasks, check actionHrid
+                if (taskData.actionHrid) {
+                    const actionParts = taskData.actionHrid.split('/');
+                    const actionName = actionParts[actionParts.length - 1].replace(/_/g, ' ');
+                    if (descLower.includes(actionName.toLowerCase())) {
+                        return taskId;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Update display for a specific task
+         * @param {Element} taskElement - Task DOM element
+         */
+        updateTaskDisplay(taskElement) {
+            const taskId = this.getTaskIdFromElement(taskElement);
+            if (!taskId) {
+                // Remove display if task not found in our data
+                const existingDisplay = taskElement.querySelector('.mwi-reroll-cost-display');
+                if (existingDisplay) {
+                    existingDisplay.remove();
+                }
+                return;
+            }
+
+            const taskData = this.taskRerollData.get(taskId);
+            if (!taskData) {
+                return;
+            }
+
+            // Calculate totals
+            const goldSpent = this.calculateGoldSpent(taskData.coinRerollCount);
+            const cowbellSpent = this.calculateCowbellSpent(taskData.cowbellRerollCount);
+
+            // Find or create display element
+            let displayElement = taskElement.querySelector(selectors_js.TOOLASHA.REROLL_COST_DISPLAY);
+
+            if (!displayElement) {
+                displayElement = document.createElement('div');
+                displayElement.className = 'mwi-reroll-cost-display';
+                displayElement.style.cssText = `
+                color: ${config.SCRIPT_COLOR_SECONDARY};
+                font-size: 0.75rem;
+                margin-top: 4px;
+                padding: 2px 4px;
+                border-radius: 3px;
+                background: rgba(0, 0, 0, 0.3);
+            `;
+
+                // Insert at top of task card
+                const taskContent = taskElement.querySelector(selectors_js.GAME.TASK_CONTENT);
+                if (taskContent) {
+                    taskContent.insertBefore(displayElement, taskContent.firstChild);
+                } else {
+                    taskElement.insertBefore(displayElement, taskElement.firstChild);
+                }
+            }
+
+            // Format display text
+            const parts = [];
+            if (cowbellSpent > 0) {
+                parts.push(`${cowbellSpent}🔔`);
+            }
+            if (goldSpent > 0) {
+                parts.push(`${formatters_js.numberFormatter(goldSpent)}💰`);
+            }
+
+            if (parts.length > 0) {
+                displayElement.textContent = `Reroll spent: ${parts.join(' + ')}`;
+                displayElement.style.display = 'block';
+            } else {
+                displayElement.style.display = 'none';
+            }
+        }
+
+        /**
+         * Update all task displays
+         */
+        updateAllTaskDisplays() {
+            const taskList = document.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskList) {
+                return;
+            }
+
+            const allTasks = taskList.querySelectorAll(selectors_js.GAME.TASK_CARD);
+            allTasks.forEach((task) => {
+                this.updateTaskDisplay(task);
+            });
+        }
+    }
+
+    const taskRerollTracker = new TaskRerollTracker();
+
+    /**
+     * Asset Manifest Utility
+     *
+     * Fetches the game's asset-manifest.json to resolve current webpack hashed
+     * sprite URLs without hardcoding hashes that break on game updates.
+     */
+
+    const MANIFEST_URL = 'https://www.milkywayidle.com/asset-manifest.json';
+
+    // Sprite keys to extract from the manifest (key → sprite name)
+    const SPRITE_KEYS = {
+        actions: 'actions_sprite',
+        items: 'items_sprite',
+        monsters: 'combat_monsters_sprite',
+        misc: 'misc_sprite',
+        abilities: 'abilities_sprite',
+    };
+
+    let manifestPromise = null;
+    let cachedUrls = null;
+
+    /**
+     * Fetch and parse the asset manifest, returning a map of sprite name → URL.
+     * Result is cached for the lifetime of the page.
+     * @returns {Promise<Object>} Map of sprite key → full URL
+     */
+    async function fetchManifest() {
+        if (cachedUrls) return cachedUrls;
+        if (manifestPromise) return manifestPromise;
+
+        manifestPromise = (async () => {
+            try {
+                const response = await fetch(MANIFEST_URL);
+                if (!response.ok) {
+                    console.warn('[AssetManifest] Failed to fetch manifest:', response.status);
+                    return {};
+                }
+
+                const manifest = await response.json();
+                const files = manifest.files || manifest; // handle both formats
+
+                const urls = {};
+                for (const [key, spriteName] of Object.entries(SPRITE_KEYS)) {
+                    // Find the entry whose key contains the sprite name and ends in .svg
+                    const entry = Object.entries(files).find(([k]) => k.includes(spriteName) && k.endsWith('.svg'));
+                    if (entry) {
+                        // Values may be relative paths like /static/media/...
+                        urls[key] = entry[1];
+                    }
+                }
+
+                cachedUrls = urls;
+                return urls;
+            } catch (error) {
+                console.warn('[AssetManifest] Error fetching manifest:', error);
+                return {};
+            }
+        })();
+
+        return manifestPromise;
+    }
+
+    /**
+     * Get a specific sprite URL by key.
+     * @param {'actions'|'items'|'monsters'|'misc'|'abilities'} key
+     * @returns {Promise<string|null>}
+     */
+    async function getSpriteUrl(key) {
+        const urls = await fetchManifest();
+        return urls[key] || null;
+    }
+
+    var assetManifest = {
+        fetchManifest,
+        getSpriteUrl,
+    };
+
+    /**
+     * Task Icon Filters
+     *
+     * Adds clickable filter icons to the task panel header for controlling
+     * which task icons are displayed. Based on MWI Task Manager implementation.
+     *
+     * Features:
+     * - Battle icon toggle (shows/hides all combat task icons)
+     * - Individual dungeon toggles (4 dungeons)
+     * - Visual state indication (opacity 1.0 = active, 0.3 = inactive)
+     * - Task count badges on each icon
+     * - Persistent filter state across sessions
+     * - Event-driven updates when filters change
+     */
+
+
+    const STORAGE_KEYS = {
+        migration: 'taskIconsFiltersMigratedV1',
+        battle: 'taskIconsFilterBattle',
+        dungeonPrefix: 'taskIconsFilterDungeon:',
+    };
+
+    class TaskIconFilters {
+        constructor() {
+            this.filterIcons = new Map(); // Map of filter ID -> DOM element
+            this.currentCounts = new Map(); // Map of filter ID -> task count
+            this.taskListObserver = null;
+            this.filterBar = null; // Reference to filter bar DOM element
+            this.settingChangeHandler = null; // Handler for setting changes
+            this.stateLoadPromise = null;
+            this.isStateLoaded = false;
+            this.manifestUrls = {}; // Sprite URLs from asset manifest
+            this.state = {
+                battle: true,
+                dungeons: {},
+            };
+
+            // Dungeon configuration matching game data
+            this.dungeonConfig = {
+                '/actions/combat/chimerical_den': {
+                    id: 'chimerical_den',
+                    name: 'Chimerical Den',
+                    spriteId: 'chimerical_den',
+                },
+                '/actions/combat/sinister_circus': {
+                    id: 'sinister_circus',
+                    name: 'Sinister Circus',
+                    spriteId: 'sinister_circus',
+                },
+                '/actions/combat/enchanted_fortress': {
+                    id: 'enchanted_fortress',
+                    name: 'Enchanted Fortress',
+                    spriteId: 'enchanted_fortress',
+                },
+                '/actions/combat/pirate_cove': {
+                    id: 'pirate_cove',
+                    name: 'Pirate Cove',
+                    spriteId: 'pirate_cove',
+                },
+            };
+        }
+
+        /**
+         * Initialize the task icon filters feature
+         */
+        initialize() {
+            // Note: Filter bar is added by task-sorter.js when task panel appears
+
+            this.loadState();
+
+            // Pre-fetch asset manifest so sprite URLs are ready when icons render
+            assetManifest.fetchManifest().then((urls) => {
+                this.manifestUrls = urls;
+            });
+
+            // Listen for taskIconsDungeons setting changes
+            this.settingChangeHandler = (enabled) => {
+                if (this.filterBar) {
+                    this.filterBar.style.display = enabled ? 'flex' : 'none';
+                }
+            };
+            config.onSettingChange('taskIconsDungeons', this.settingChangeHandler);
+        }
+
+        async loadState() {
+            if (this.stateLoadPromise) {
+                return this.stateLoadPromise;
+            }
+
+            this.stateLoadPromise = this.loadStateInternal();
+            return this.stateLoadPromise;
+        }
+
+        async loadStateInternal() {
+            try {
+                const migrated = await storage.get(STORAGE_KEYS.migration, 'settings', false);
+
+                if (migrated) {
+                    await this.loadStateFromStorage();
+                } else {
+                    this.loadStateFromLocalStorage();
+                    const migrated = await this.persistStateToStorage();
+                    if (migrated) {
+                        await storage.set(STORAGE_KEYS.migration, true, 'settings', true);
+                        this.clearLocalStorageState();
+                    }
+                }
+            } catch (error) {
+                console.error('[TaskIconFilters] Failed to load filter state:', error);
+            } finally {
+                this.isStateLoaded = true;
+                this.updateAllIconStates();
+                this.dispatchFilterChange('init');
+            }
+        }
+
+        loadStateFromLocalStorage() {
+            const storedBattle = localStorage.getItem('mwi-taskIconsFilterBattle');
+            this.state.battle = storedBattle === null || storedBattle === 'true';
+
+            Object.values(this.dungeonConfig).forEach((dungeon) => {
+                const stored = localStorage.getItem(`mwi-taskIconsFilter-${dungeon.id}`);
+                this.state.dungeons[dungeon.id] = stored === 'true';
+            });
+        }
+
+        async loadStateFromStorage() {
+            const storedBattle = await storage.get(STORAGE_KEYS.battle, 'settings', true);
+            this.state.battle = storedBattle === true;
+
+            const dungeonEntries = Object.values(this.dungeonConfig).map(async (dungeon) => {
+                const key = `${STORAGE_KEYS.dungeonPrefix}${dungeon.id}`;
+                const enabled = await storage.get(key, 'settings', false);
+                return { id: dungeon.id, enabled: enabled === true };
+            });
+
+            const results = await Promise.all(dungeonEntries);
+            results.forEach(({ id, enabled }) => {
+                this.state.dungeons[id] = enabled;
+            });
+        }
+
+        async persistStateToStorage() {
+            const battleSaved = await storage.set(STORAGE_KEYS.battle, this.state.battle, 'settings', true);
+
+            const dungeonWrites = Object.values(this.dungeonConfig).map((dungeon) => {
+                const key = `${STORAGE_KEYS.dungeonPrefix}${dungeon.id}`;
+                return storage.set(key, this.state.dungeons[dungeon.id] === true, 'settings', true);
+            });
+
+            const dungeonResults = await Promise.all(dungeonWrites);
+            return battleSaved && dungeonResults.every(Boolean);
+        }
+
+        clearLocalStorageState() {
+            localStorage.removeItem('mwi-taskIconsFilterBattle');
+            Object.values(this.dungeonConfig).forEach((dungeon) => {
+                localStorage.removeItem(`mwi-taskIconsFilter-${dungeon.id}`);
+            });
+        }
+
+        /**
+         * Cleanup when feature is disabled
+         */
+        cleanup() {
+            // Remove setting change listener
+            if (this.settingChangeHandler) {
+                config.offSettingChange('taskIconsDungeons', this.settingChangeHandler);
+                this.settingChangeHandler = null;
+            }
+
+            // Disconnect task list observer
+            if (this.taskListObserver) {
+                this.taskListObserver();
+                this.taskListObserver = null;
+            }
+
+            // Remove filter bar from DOM
+            if (this.filterBar) {
+                this.filterBar.remove();
+                this.filterBar = null;
+            }
+
+            // Clear maps
+            this.filterIcons.clear();
+            this.currentCounts.clear();
+        }
+
+        /**
+         * Add filter icon bar to task panel header
+         * Called by task-sorter.js when task panel appears
+         * @param {HTMLElement} headerElement - Task panel header element
+         */
+        async addFilterBar(headerElement) {
+            // Check if we already added filters to this header
+            if (headerElement.querySelector('[data-mwi-task-filters]')) {
+                return;
+            }
+
+            // Ensure state is loaded before creating icons so persisted state is reflected
+            await this.loadState();
+
+            // Ensure manifest URLs are loaded before creating icons
+            this.manifestUrls = await assetManifest.fetchManifest();
+
+            // Find the task panel container to observe task list
+            // DOM structure: Grandparent > TaskBoardInfo (parent) > TaskSlotCount (header)
+            //                Grandparent > TaskList (sibling to TaskBoardInfo)
+            // So we need to go up two levels to find the common container
+            const panel = headerElement.parentElement?.parentElement;
+            if (!panel) {
+                console.warn('[TaskIconFilters] Could not find task panel grandparent');
+                return;
+            }
+
+            // Create container for filter icons
+            this.filterBar = document.createElement('div');
+            this.filterBar.setAttribute('data-mwi-task-filters', 'true');
+            this.filterBar.style.gap = '8px';
+            this.filterBar.style.alignItems = 'center';
+            this.filterBar.style.marginLeft = '8px';
+
+            // Check if taskIconsDungeons setting is enabled
+            const isEnabled = config.isFeatureEnabled('taskIconsDungeons');
+            this.filterBar.style.display = isEnabled ? 'flex' : 'none';
+
+            // Create battle icon (combat icon is in misc_sprite)
+            const battleIcon = this.createFilterIcon(
+                'battle',
+                'Battle',
+                'combat',
+                () => this.getBattleFilterEnabled(),
+                'misc'
+            );
+            this.filterBar.appendChild(battleIcon);
+            this.filterIcons.set('battle', battleIcon);
+
+            // Create dungeon icons (dungeon icons are in actions_sprite)
+            Object.entries(this.dungeonConfig).forEach(([hrid, dungeon]) => {
+                const dungeonIcon = this.createFilterIcon(
+                    dungeon.id,
+                    dungeon.name,
+                    dungeon.spriteId,
+                    () => this.getDungeonFilterEnabled(hrid),
+                    'actions'
+                );
+                this.filterBar.appendChild(dungeonIcon);
+                this.filterIcons.set(dungeon.id, dungeonIcon);
+            });
+
+            // Insert filter bar after the task sort button (if it exists)
+            const sortButton = headerElement.querySelector('[data-mwi-task-sort]');
+            if (sortButton) {
+                sortButton.parentNode.insertBefore(this.filterBar, sortButton.nextSibling);
+            } else {
+                headerElement.appendChild(this.filterBar);
+            }
+
+            // Initial count update
+            this.updateCounts(panel);
+
+            // Start observing task list for count updates
+            this.observeTaskList(panel);
+        }
+
+        /**
+         * Create a clickable filter icon with count badge
+         * @param {string} id - Unique identifier for this filter
+         * @param {string} title - Tooltip text
+         * @param {string} symbolId - Symbol ID in sprite
+         * @param {Function} getEnabled - Function to check if filter is enabled
+         * @param {string} spriteType - Sprite type: 'misc', 'actions', 'items' (default: 'actions')
+         * @returns {HTMLElement} Filter icon container
+         */
+        createFilterIcon(id, title, symbolId, getEnabled, spriteType = 'actions') {
+            const container = document.createElement('div');
+            container.setAttribute('data-filter-id', id);
+            container.style.position = 'relative';
+            container.style.cursor = 'pointer';
+            container.style.userSelect = 'none';
+            container.title = title;
+
+            // Get sprite URL from manifest
+            const spriteUrl = this.manifestUrls[spriteType] || null;
+
+            // Create SVG icon
+            if (spriteUrl) {
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('width', '24');
+                svg.setAttribute('height', '24');
+                svg.setAttribute('viewBox', '0 0 1024 1024');
+                svg.style.display = 'block';
+                svg.style.transition = 'opacity 0.2s';
+
+                // Create use element with external sprite reference
+                const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+                use.setAttribute('href', `${spriteUrl}#${symbolId}`);
+                svg.appendChild(use);
+                container.appendChild(svg);
+            }
+
+            // Create count badge
+            const countBadge = document.createElement('span');
+            countBadge.setAttribute('data-count-badge', 'true');
+            countBadge.style.position = 'absolute';
+            countBadge.style.top = '-4px';
+            countBadge.style.right = '-8px';
+            countBadge.style.fontSize = '11px';
+            countBadge.style.fontWeight = 'bold';
+            countBadge.style.color = '#fff';
+            countBadge.style.textShadow = '0 0 2px #000, 0 0 2px #000';
+            countBadge.style.pointerEvents = 'none';
+            countBadge.style.transition = 'opacity 0.2s';
+            countBadge.textContent = '*0';
+            container.appendChild(countBadge);
+
+            // Click handler
+            container.addEventListener('click', () => {
+                this.handleFilterClick(id);
+            });
+
+            // Set initial state
+            this.updateIconState(container, getEnabled());
+
+            return container;
+        }
+
+        /**
+         * Handle filter icon click
+         * @param {string} filterId - ID of the filter that was clicked
+         */
+        handleFilterClick(filterId) {
+            if (filterId === 'battle') {
+                // Toggle battle filter
+                const currentState = this.getBattleFilterEnabled();
+                this.state.battle = !currentState;
+                storage.set(STORAGE_KEYS.battle, this.state.battle, 'settings', true);
+            } else {
+                // Toggle dungeon filter
+                const dungeonHrid = Object.keys(this.dungeonConfig).find(
+                    (hrid) => this.dungeonConfig[hrid].id === filterId
+                );
+                if (dungeonHrid) {
+                    const currentState = this.getDungeonFilterEnabled(dungeonHrid);
+                    this.state.dungeons[filterId] = !currentState;
+                    const key = `${STORAGE_KEYS.dungeonPrefix}${filterId}`;
+                    storage.set(key, this.state.dungeons[filterId], 'settings', true);
+                }
+            }
+
+            // Update all icon states
+            this.updateAllIconStates();
+
+            // Dispatch custom event to notify other components
+            this.dispatchFilterChange(filterId);
+        }
+
+        dispatchFilterChange(filterId) {
+            document.dispatchEvent(
+                new CustomEvent('mwi-task-icon-filter-changed', {
+                    detail: {
+                        filterId,
+                        battleEnabled: this.getBattleFilterEnabled(),
+                    },
+                })
+            );
+        }
+
+        /**
+         * Update visual state of a filter icon
+         * @param {HTMLElement} container - Filter icon container
+         * @param {boolean} enabled - Whether filter is enabled
+         */
+        updateIconState(container, enabled) {
+            const svg = container.querySelector('svg');
+            const countBadge = container.querySelector('[data-count-badge]');
+
+            // If SVG doesn't exist (sprite not loaded yet), skip update
+            if (!svg || !countBadge) {
+                return;
+            }
+
+            if (enabled) {
+                svg.style.opacity = '1.0';
+                countBadge.style.display = 'inline';
+            } else {
+                svg.style.opacity = '0.3';
+                countBadge.style.display = 'none';
+            }
+        }
+
+        /**
+         * Update all icon states based on current config
+         */
+        updateAllIconStates() {
+            // Update battle icon
+            const battleIcon = this.filterIcons.get('battle');
+            if (battleIcon) {
+                this.updateIconState(battleIcon, this.getBattleFilterEnabled());
+            }
+
+            // Update dungeon icons
+            Object.entries(this.dungeonConfig).forEach(([hrid, dungeon]) => {
+                const dungeonIcon = this.filterIcons.get(dungeon.id);
+                if (dungeonIcon) {
+                    this.updateIconState(dungeonIcon, this.getDungeonFilterEnabled(hrid));
+                }
+            });
+        }
+
+        /**
+         * Update task counts on all filter icons
+         * @param {HTMLElement} panel - Task panel container
+         */
+        updateCounts(panel) {
+            // Find all task items in the panel
+            const taskItems = panel.querySelectorAll(selectors_js.GAME.TASK_CARD);
+
+            // Count tasks for each filter
+            const counts = {
+                battle: 0,
+                chimerical_den: 0,
+                sinister_circus: 0,
+                enchanted_fortress: 0,
+                pirate_cove: 0,
+            };
+
+            taskItems.forEach((taskItem) => {
+                // Check if this is a combat task
+                const isCombatTask = this.isTaskCombat(taskItem);
+
+                if (isCombatTask) {
+                    counts.battle++;
+
+                    // Check which dungeon this task is for
+                    const dungeonType = this.getTaskDungeonType(taskItem);
+                    if (dungeonType && counts.hasOwnProperty(dungeonType)) {
+                        counts[dungeonType]++;
+                    }
+                }
+            });
+
+            // Update count badges
+            this.filterIcons.forEach((icon, filterId) => {
+                const count = counts[filterId] || 0;
+                const countBadge = icon.querySelector('[data-count-badge]');
+                if (countBadge) {
+                    countBadge.textContent = `*${count}`;
+                }
+                this.currentCounts.set(filterId, count);
+            });
+        }
+
+        /**
+         * Check if a task item is a combat task
+         * @param {HTMLElement} taskItem - Task item element
+         * @returns {boolean} True if this is a combat task
+         */
+        isTaskCombat(taskItem) {
+            // Check for monster icon class added by task-icons.js to all combat tasks
+            const monsterIcon = taskItem.querySelector('.mwi-task-icon-monster');
+            return monsterIcon !== null;
+        }
+
+        /**
+         * Get the dungeon type for a combat task
+         * @param {HTMLElement} taskItem - Task item element
+         * @returns {string|null} Dungeon ID or null if not a dungeon task
+         */
+        getTaskDungeonType(taskItem) {
+            // Look for dungeon badge icons (using class, not ID)
+            const badges = taskItem.querySelectorAll('.mwi-task-icon-dungeon svg use');
+
+            if (!badges || badges.length === 0) {
+                return null;
+            }
+
+            // Check each badge to identify the dungeon
+            for (const badge of badges) {
+                const href = badge.getAttribute('href') || badge.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+
+                if (!href) continue;
+
+                // Match href to dungeon config
+                for (const [_hrid, dungeon] of Object.entries(this.dungeonConfig)) {
+                    if (href.includes(dungeon.spriteId)) {
+                        return dungeon.id;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Set up observer to watch for task list changes
+         * @param {HTMLElement} panel - Task panel container
+         */
+        observeTaskList(panel) {
+            // Find the task list container
+            const taskList = panel.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskList) {
+                console.warn('[TaskIconFilters] Could not find task list');
+                return;
+            }
+
+            // Disconnect existing observer if any
+            if (this.taskListObserver) {
+                this.taskListObserver();
+            }
+
+            // Create new observer
+            this.taskListObserver = domObserverHelpers_js.createMutationWatcher(
+                taskList,
+                () => {
+                    this.updateCounts(panel);
+                },
+                {
+                    childList: true,
+                    subtree: true,
+                }
+            );
+        }
+
+        /**
+         * Check if battle filter is enabled
+         * @returns {boolean} True if battle icons should be shown
+         */
+        getBattleFilterEnabled() {
+            return this.state.battle !== false;
+        }
+
+        /**
+         * Check if a specific dungeon filter is enabled
+         * @param {string} dungeonHrid - Dungeon action HRID
+         * @returns {boolean} True if this dungeon's badges should be shown
+         */
+        getDungeonFilterEnabled(dungeonHrid) {
+            const dungeon = this.dungeonConfig[dungeonHrid];
+            if (!dungeon) return false;
+
+            return this.state.dungeons[dungeon.id] === true;
+        }
+
+        /**
+         * Check if a specific dungeon badge should be shown
+         * @param {string} dungeonHrid - Dungeon action HRID
+         * @returns {boolean} True if badge should be shown
+         */
+        shouldShowDungeonBadge(dungeonHrid) {
+            // Must have both battle toggle enabled AND specific dungeon toggle enabled
+            return this.getBattleFilterEnabled() && this.getDungeonFilterEnabled(dungeonHrid);
+        }
+    }
+
+    // Export singleton instance
+    const taskIconFilters = new TaskIconFilters();
+
+    /**
+     * Task Icons
+     * Adds visual icon overlays to task cards
+     */
+
+
+    class TaskIcons {
+        constructor() {
+            this.initialized = false;
+            this.observers = [];
+            this.characterSwitchingHandler = null;
+
+            // Cache for parsed game data
+            this.itemsByHrid = null;
+            this.actionsByHrid = null;
+            this.monstersByHrid = null;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+
+            // Sprite URLs resolved from asset manifest
+            this.manifestUrls = {};
+
+            // Cache for detected sprite URLs (avoid repeated DOM queries)
+            this.cachedSpriteUrls = {
+                actions: null,
+                items: null,
+                monsters: null,
+                misc: null,
+            };
+
+            // Track if we've already attempted to load sprites
+            this.spriteLoadAttempted = {
+                actions: false,
+                items: false,
+                monsters: false,
+                misc: false,
+            };
+
+            // Track if we're currently fetching a sprite to avoid duplicate requests
+            this.spriteFetchInProgress = {
+                monsters: false,
+            };
+
+            // Store fetched sprite SVG content
+            this.fetchedSprites = {
+                monsters: null,
+            };
+
+            // Track if we've shown the sprite warning
+            this.spriteWarningShown = false;
+        }
+
+        /**
+         * Initialize the task icons feature
+         */
+        initialize() {
+            if (this.initialized) {
+                return;
+            }
+
+            // Load game data from DataManager
+            this.loadGameData();
+
+            // Watch for task cards being added/updated
+            this.watchTaskCards();
+
+            this.characterSwitchingHandler = () => {
+                this.cleanup();
+            };
+
+            dataManager.on('character_switching', this.characterSwitchingHandler);
+
+            // Listen for filter changes to refresh icons
+            this.filterChangeHandler = () => {
+                this.refreshAllIcons();
+            };
+            document.addEventListener('mwi-task-icon-filter-changed', this.filterChangeHandler);
+
+            this.initialized = true;
+        }
+
+        /**
+         * Load game data from DataManager
+         */
+        loadGameData() {
+            const gameData = dataManager.getInitClientData();
+            if (!gameData) {
+                return;
+            }
+
+            // Build lookup maps for quick access
+            this.itemsByHrid = new Map();
+            this.actionsByHrid = new Map();
+            this.monstersByHrid = new Map();
+            this.locationsByHrid = new Map();
+
+            // Index items
+            if (gameData.itemDetailMap) {
+                Object.entries(gameData.itemDetailMap).forEach(([hrid, item]) => {
+                    this.itemsByHrid.set(hrid, item);
+                });
+            }
+
+            // Index actions
+            if (gameData.actionDetailMap) {
+                Object.entries(gameData.actionDetailMap).forEach(([hrid, action]) => {
+                    this.actionsByHrid.set(hrid, action);
+                });
+            }
+
+            // Index monsters
+            if (gameData.combatMonsterDetailMap) {
+                Object.entries(gameData.combatMonsterDetailMap).forEach(([hrid, monster]) => {
+                    this.monstersByHrid.set(hrid, monster);
+                });
+            }
+        }
+
+        /**
+         * Watch for task cards in the DOM
+         */
+        watchTaskCards() {
+            // Process existing task cards
+            this.processAllTaskCards();
+
+            // Watch for task list appearing
+            const unregisterTaskList = domObserver.onClass('TaskIcons-TaskList', 'TasksPanel_taskList', () => {
+                this.processAllTaskCards();
+            });
+            this.observers.push(unregisterTaskList);
+
+            // Watch for individual task cards appearing
+            const unregisterTask = domObserver.onClass('TaskIcons-Task', 'RandomTask_randomTask', () => {
+                this.processAllTaskCards();
+            });
+            this.observers.push(unregisterTask);
+
+            // Fetch all sprite URLs from manifest, then inject monster sprite and re-process
+            assetManifest.fetchManifest().then((urls) => {
+                this.manifestUrls = urls;
+                if (!this.cachedSpriteUrls.monsters) {
+                    this.fetchAndInjectMonsterSprite(urls.monsters ? [urls.monsters] : []);
+                }
+                // Re-process now that all sprite URLs are available
+                this.clearAllProcessedMarkers();
+                this.processAllTaskCards();
+            });
+
+            // Watch for task rerolls via WebSocket
+            const questsHandler = (data) => {
+                if (!data.endCharacterQuests) {
+                    return;
+                }
+
+                // Wait for game to update DOM before updating icons
+                const iconsTimeout = setTimeout(() => {
+                    this.clearAllProcessedMarkers();
+                    this.processAllTaskCards();
+                }, 250);
+                this.timerRegistry.registerTimeout(iconsTimeout);
+            };
+
+            webSocketHook.on('quests_updated', questsHandler);
+
+            this.observers.push(() => {
+                webSocketHook.off('quests_updated', questsHandler);
+            });
+        }
+
+        /**
+         * Check if combat sprites are loaded and show warning if not
+         */
+        checkAndShowSpriteWarning() {
+            // Only check if we haven't shown the warning yet
+            if (this.spriteWarningShown) {
+                return;
+            }
+
+            // Check if monster sprites are loaded
+            const monsterSpriteUrl = this.cachedSpriteUrls.monsters;
+            if (monsterSpriteUrl) {
+                // Sprites are loaded, remove warning if it exists
+                this.removeSpriteWarning();
+                return;
+            }
+
+            // Check if there are any combat tasks that would need the sprites
+            const taskCards = document.querySelectorAll(selectors_js.GAME.TASK_CARD);
+            let hasCombatTasks = false;
+
+            for (const taskCard of taskCards) {
+                const taskInfo = this.parseTaskCard(taskCard);
+                if (taskInfo && taskInfo.isCombatTask) {
+                    hasCombatTasks = true;
+                    break;
+                }
+            }
+
+            // Only show warning if there are combat tasks
+            if (hasCombatTasks) {
+                this.showSpriteWarning();
+            }
+        }
+
+        /**
+         * Show warning notification in Tasks panel title
+         */
+        showSpriteWarning() {
+            const titleElement = document.querySelector('h1.TasksPanel_title__6_y-9');
+            if (!titleElement) {
+                return;
+            }
+
+            // Check if warning already exists
+            if (document.getElementById('mwi-sprite-warning')) {
+                return;
+            }
+
+            // Create warning element
+            const warning = document.createElement('div');
+            warning.id = 'mwi-sprite-warning';
+            warning.style.cssText = `
+            color: #ef4444;
+            font-size: 0.75em;
+            font-weight: 500;
+            margin-top: 4px;
+        `;
+            warning.textContent = '⚠ Combat icons unavailable - visit Combat to load sprites';
+            warning.title = 'Combat monster sprites need to be loaded. Visit the Combat panel to load them.';
+
+            titleElement.appendChild(warning);
+            this.spriteWarningShown = true;
+        }
+
+        /**
+         * Remove sprite warning notification
+         */
+        removeSpriteWarning() {
+            const warning = document.getElementById('mwi-sprite-warning');
+            if (warning) {
+                warning.remove();
+                this.spriteWarningShown = false;
+            }
+        }
+
+        /**
+         * Process all task cards in the DOM
+         */
+        processAllTaskCards() {
+            const taskList = document.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskList) {
+                return;
+            }
+
+            // Ensure game data is loaded
+            if (!this.itemsByHrid || this.itemsByHrid.size === 0) {
+                this.loadGameData();
+                if (!this.itemsByHrid || this.itemsByHrid.size === 0) {
+                    return;
+                }
+            }
+
+            // Check if combat sprites are loaded and show warning if needed
+            this.checkAndShowSpriteWarning();
+
+            const taskCards = taskList.querySelectorAll(selectors_js.GAME.TASK_CARD);
+
+            taskCards.forEach((card) => {
+                // Get current task name
+                const nameElement = card.querySelector(selectors_js.GAME.TASK_NAME);
+                if (!nameElement) return;
+
+                const taskName = nameElement.textContent.trim();
+
+                // Check if this card already has icons for this exact task
+                const processedTaskName = card.getAttribute('data-mwi-task-processed');
+
+                // Only process if:
+                // 1. Card has never been processed, OR
+                // 2. Task name has changed (task was rerolled)
+                if (processedTaskName !== taskName) {
+                    // Remove old icons (if any)
+                    this.removeIcons(card);
+
+                    // Add new icons
+                    this.addIconsToTaskCard(card);
+
+                    // Mark card as processed with current task name
+                    card.setAttribute('data-mwi-task-processed', taskName);
+                }
+            });
+        }
+
+        /**
+         * Clear all processed markers to force icon refresh
+         */
+        clearAllProcessedMarkers() {
+            const taskList = document.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskList) {
+                return;
+            }
+
+            const taskCards = taskList.querySelectorAll(selectors_js.GAME.TASK_CARD);
+            taskCards.forEach((card) => {
+                card.removeAttribute('data-mwi-task-processed');
+            });
+        }
+
+        /**
+         * Refresh all icons (called when filters change)
+         */
+        refreshAllIcons() {
+            this.clearAllProcessedMarkers();
+            this.processAllTaskCards();
+        }
+
+        /**
+         * Add icon overlays to a task card
+         */
+        addIconsToTaskCard(taskCard) {
+            // Parse task description to get task type and name
+            const taskInfo = this.parseTaskCard(taskCard);
+            if (!taskInfo) {
+                return;
+            }
+
+            // Add appropriate icons based on task type
+            if (taskInfo.isCombatTask) {
+                this.addMonsterIcon(taskCard, taskInfo);
+            } else {
+                this.addActionIcon(taskCard, taskInfo);
+            }
+        }
+
+        /**
+         * Parse task card to extract task information
+         */
+        parseTaskCard(taskCard) {
+            const nameElement = taskCard.querySelector(selectors_js.GAME.TASK_NAME);
+            if (!nameElement) {
+                return null;
+            }
+
+            const fullText = nameElement.textContent.trim();
+
+            // Format is "SkillType - TaskName" or "Defeat - MonsterName"
+            const match = fullText.match(/^(.+?)\s*-\s*(.+)$/);
+            if (!match) {
+                return null;
+            }
+
+            const [, skillType, taskName] = match;
+
+            const taskInfo = {
+                skillType: skillType.trim(),
+                taskName: taskName.trim(),
+                fullText,
+                isCombatTask: skillType.trim() === 'Defeat',
+            };
+
+            return taskInfo;
+        }
+
+        /**
+         * Find action HRID by display name
+         */
+        findActionHrid(actionName) {
+            // Search through actions to find matching name
+            for (const [hrid, action] of this.actionsByHrid) {
+                if (action.name === actionName) {
+                    return hrid;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Find monster HRID by display name
+         */
+        findMonsterHrid(monsterName) {
+            // Strip zone tier suffix (e.g., "Grizzly BearZ8" → "Grizzly Bear")
+            // Format is: MonsterNameZ# where # is the zone index
+            const cleanName = monsterName.replace(/Z\d+$/, '').trim();
+
+            // Search through monsters to find matching name
+            for (const [hrid, monster] of this.monstersByHrid) {
+                if (monster.name === cleanName) {
+                    return hrid;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Add action icon to task card
+         */
+        addActionIcon(taskCard, taskInfo) {
+            const actionHrid = this.findActionHrid(taskInfo.taskName);
+            if (!actionHrid) {
+                return;
+            }
+
+            const action = this.actionsByHrid.get(actionHrid);
+            if (!action) {
+                return;
+            }
+
+            // Determine icon name and sprite type
+            let iconName;
+            let spriteType = 'item'; // Default to items_sprite
+
+            // Check if action produces a specific item (use item sprite)
+            if (action.outputItems && action.outputItems.length > 0) {
+                const outputItem = action.outputItems[0];
+                const itemHrid = outputItem.itemHrid || outputItem.hrid;
+                const item = this.itemsByHrid.get(itemHrid);
+                if (item) {
+                    iconName = itemHrid.split('/').pop();
+                    spriteType = 'item';
+                }
+            }
+
+            // If still no icon, try to find corresponding item for gathering actions
+            if (!iconName) {
+                // Convert action HRID to item HRID (e.g., /actions/foraging/cow → /items/cow)
+                const actionName = actionHrid.split('/').pop();
+                const potentialItemHrid = `/items/${actionName}`;
+                const potentialItem = this.itemsByHrid.get(potentialItemHrid);
+
+                if (potentialItem) {
+                    iconName = actionName;
+                    spriteType = 'item';
+                } else {
+                    // Fall back to action sprite (e.g., for trees in woodcutting)
+                    iconName = actionName;
+                    spriteType = 'action';
+                }
+            }
+
+            this.addIconOverlay(taskCard, iconName, spriteType);
+        }
+
+        /**
+         * Add monster icon to task card
+         */
+        async addMonsterIcon(taskCard, taskInfo) {
+            const monsterHrid = this.findMonsterHrid(taskInfo.taskName);
+            if (!monsterHrid) {
+                return;
+            }
+
+            // Count dungeons if dungeon icons are enabled
+            let dungeonCount = 0;
+            if (config.isFeatureEnabled('taskIconsDungeons')) {
+                dungeonCount = this.countDungeonsForMonster(monsterHrid);
+            }
+
+            // Calculate icon width based on total count (1 monster + N dungeons)
+            const totalIcons = 1 + dungeonCount;
+            let iconWidth;
+            if (totalIcons <= 2) {
+                iconWidth = 30;
+            } else if (totalIcons <= 4) {
+                iconWidth = 25;
+            } else {
+                iconWidth = 20;
+            }
+
+            // Position monster on the right (ends at 100%)
+            const monsterPosition = 100 - iconWidth;
+            const iconName = monsterHrid.split('/').pop();
+            await this.addIconOverlay(taskCard, iconName, 'monster', `${monsterPosition}%`, `${iconWidth}%`);
+
+            // Add dungeon icons if enabled
+            if (config.isFeatureEnabled('taskIconsDungeons') && dungeonCount > 0) {
+                await this.addDungeonIcons(taskCard, monsterHrid, iconWidth);
+            }
+        }
+
+        /**
+         * Count how many dungeons a monster appears in
+         */
+        countDungeonsForMonster(monsterHrid) {
+            let count = 0;
+
+            for (const [_actionHrid, action] of this.actionsByHrid) {
+                if (!action.combatZoneInfo?.isDungeon) continue;
+
+                const dungeonInfo = action.combatZoneInfo.dungeonInfo;
+                if (!dungeonInfo) continue;
+
+                let monsterFound = false;
+
+                // Check random spawns
+                if (dungeonInfo.randomSpawnInfoMap) {
+                    for (const waveSpawns of Object.values(dungeonInfo.randomSpawnInfoMap)) {
+                        if (waveSpawns.spawns) {
+                            for (const spawn of waveSpawns.spawns) {
+                                if (spawn.combatMonsterHrid === monsterHrid) {
+                                    monsterFound = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (monsterFound) break;
+                    }
+                }
+
+                // Check fixed spawns
+                if (!monsterFound && dungeonInfo.fixedSpawnsMap) {
+                    for (const waveSpawns of Object.values(dungeonInfo.fixedSpawnsMap)) {
+                        for (const spawn of waveSpawns) {
+                            if (spawn.combatMonsterHrid === monsterHrid) {
+                                monsterFound = true;
+                                break;
+                            }
+                        }
+                        if (monsterFound) break;
+                    }
+                }
+
+                if (monsterFound) {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        /**
+         * Add dungeon icons for a monster
+         * @param {HTMLElement} taskCard - Task card element
+         * @param {string} monsterHrid - Monster HRID
+         * @param {number} iconWidth - Width percentage for each icon
+         */
+        async addDungeonIcons(taskCard, monsterHrid, iconWidth) {
+            const monster = this.monstersByHrid.get(monsterHrid);
+            if (!monster) return;
+
+            // Find which dungeons this monster appears in
+            const dungeonHrids = [];
+
+            for (const [actionHrid, action] of this.actionsByHrid) {
+                // Skip non-dungeon actions
+                if (!action.combatZoneInfo?.isDungeon) continue;
+
+                const dungeonInfo = action.combatZoneInfo.dungeonInfo;
+                if (!dungeonInfo) continue;
+
+                let monsterFound = false;
+
+                // Check random spawns (regular waves)
+                if (dungeonInfo.randomSpawnInfoMap) {
+                    for (const waveSpawns of Object.values(dungeonInfo.randomSpawnInfoMap)) {
+                        if (waveSpawns.spawns) {
+                            for (const spawn of waveSpawns.spawns) {
+                                if (spawn.combatMonsterHrid === monsterHrid) {
+                                    monsterFound = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (monsterFound) break;
+                    }
+                }
+
+                // Check fixed spawns (boss waves)
+                if (!monsterFound && dungeonInfo.fixedSpawnsMap) {
+                    for (const waveSpawns of Object.values(dungeonInfo.fixedSpawnsMap)) {
+                        for (const spawn of waveSpawns) {
+                            if (spawn.combatMonsterHrid === monsterHrid) {
+                                monsterFound = true;
+                                break;
+                            }
+                        }
+                        if (monsterFound) break;
+                    }
+                }
+
+                if (monsterFound) {
+                    dungeonHrids.push(actionHrid);
+                }
+            }
+
+            // Position dungeons right-to-left, starting from left of monster
+            const monsterPosition = 100 - iconWidth;
+            let position = monsterPosition - iconWidth; // Start one icon to the left of monster
+
+            for (const dungeonHrid of dungeonHrids) {
+                // Check if this dungeon should be shown based on filter settings
+                if (!taskIconFilters.shouldShowDungeonBadge(dungeonHrid)) {
+                    continue; // Skip this dungeon
+                }
+
+                const iconName = dungeonHrid.split('/').pop();
+                await this.addIconOverlay(taskCard, iconName, 'dungeon', `${position}%`, `${iconWidth}%`);
+                position -= iconWidth; // Move left for next dungeon
+            }
+        }
+
+        /**
+         * Get the current items sprite URL from the manifest
+         * @returns {string|null} Items sprite URL or null if manifest not yet loaded
+         */
+        getItemsSpriteUrl() {
+            return this.manifestUrls.items || null;
+        }
+
+        /**
+         * Get the current combat monsters sprite URL
+         * @returns {string|null} Monsters sprite URL or null if not yet injected
+         */
+        getMonstersSpriteUrl() {
+            return this.cachedSpriteUrls.monsters || this.manifestUrls.monsters || null;
+        }
+
+        /**
+         * Fetch combat_monsters_sprite and inject it into the page
+         * @param {Array<string>} detectedHashes - Array of webpack hashes to try
+         * @returns {Promise<string|null>} Sprite URL if successful
+         */
+        async fetchAndInjectMonsterSprite(manifestUrls = []) {
+            if (this.spriteFetchInProgress.monsters) {
+                return null; // Already fetching, avoid duplicate requests
+            }
+
+            this.spriteFetchInProgress.monsters = true;
+
+            // Use manifest URLs first, then plain fallbacks without hardcoded hashes
+            const fallbackUrls = [
+                ...manifestUrls,
+                '/static/media/combat_monsters_sprite.svg',
+                'combat_monsters_sprite.svg',
+            ];
+
+            try {
+                // Try each fallback URL until one works
+                for (const url of fallbackUrls) {
+                    try {
+                        const response = await fetch(url);
+
+                        if (!response.ok) {
+                            continue;
+                        }
+
+                        const svgText = await response.text();
+
+                        // Parse the SVG and inject it into the page
+                        const parser = new DOMParser();
+                        const svgDoc = parser.parseFromString(svgText, 'image/svg+xml');
+
+                        // Check for parsing errors
+                        const parserError = svgDoc.querySelector('parsererror');
+                        if (parserError) {
+                            continue;
+                        }
+
+                        const svgElement = svgDoc.querySelector('svg');
+
+                        // Try documentElement as fallback
+                        const rootElement = svgDoc.documentElement;
+
+                        // Use either querySelector result or documentElement (if it's an SVG)
+                        const finalElement =
+                            svgElement || (rootElement?.tagName?.toLowerCase() === 'svg' ? rootElement : null);
+
+                        if (finalElement) {
+                            // Hide the SVG (we only need it for symbol definitions)
+                            finalElement.style.display = 'none';
+                            finalElement.setAttribute('id', 'mwi-injected-monsters-sprite');
+
+                            // Inject into page body
+                            document.body.appendChild(finalElement);
+
+                            // Cache URL and refresh task icons now that sprite is available
+                            this.fetchedSprites.monsters = url;
+                            this.cachedSpriteUrls.monsters = url;
+                            this.removeSpriteWarning();
+                            this.clearAllProcessedMarkers();
+                            this.processAllTaskCards();
+                            return url;
+                        }
+                    } catch {
+                        // Try next URL
+                        continue;
+                    }
+                }
+
+                return null;
+            } finally {
+                this.spriteFetchInProgress.monsters = false;
+            }
+        }
+
+        /**
+         * Get the current actions sprite URL from the manifest (for dungeon icons)
+         * @returns {string|null} Actions sprite URL or null if manifest not yet loaded
+         */
+        getActionsSpriteUrl() {
+            return this.manifestUrls.actions || null;
+        }
+
+        /**
+         * Get the current misc sprite URL from the manifest
+         * @returns {string|null} Misc sprite URL or null if manifest not yet loaded
+         */
+        getMiscSpriteUrl() {
+            return this.manifestUrls.misc || null;
+        }
+
+        /**
+         * Add icon overlay to task card
+         * @param {HTMLElement} taskCard - Task card element
+         * @param {string} iconName - Icon name in sprite (symbol ID)
+         * @param {string} type - Icon type (action/monster/dungeon)
+         * @param {string} leftPosition - Left position percentage
+         * @param {string} widthPercent - Width percentage (default: '30%')
+         */
+        async addIconOverlay(taskCard, iconName, type, leftPosition = '50%', widthPercent = '30%') {
+            // Create container for icon
+            const iconDiv = document.createElement('div');
+            iconDiv.className = `mwi-task-icon mwi-task-icon-${type}`;
+            iconDiv.style.position = 'absolute';
+            iconDiv.style.left = leftPosition;
+            iconDiv.style.width = widthPercent;
+            iconDiv.style.height = '100%';
+            iconDiv.style.opacity = '0.3';
+            iconDiv.style.pointerEvents = 'none';
+            iconDiv.style.zIndex = '0';
+
+            // Get appropriate sprite URL based on icon type
+            let spriteUrl;
+            if (type === 'monster') {
+                // Await monster sprite (might fetch it)
+                spriteUrl = this.getMonstersSpriteUrl();
+            } else if (type === 'dungeon' || type === 'action') {
+                // Dungeon icons and action icons (trees, etc.) are in actions_sprite
+                spriteUrl = this.getActionsSpriteUrl();
+            } else {
+                // Item icons are in items_sprite (default)
+                spriteUrl = this.getItemsSpriteUrl();
+            }
+
+            if (!spriteUrl) {
+                // Sprite not loaded yet, skip icon
+                return;
+            }
+
+            // Create SVG element
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', '100%');
+            svg.setAttribute('height', '100%');
+
+            // Create use element with external sprite reference
+            const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+            // Set both href and xlink:href for browser compatibility
+            const spriteReference = `${spriteUrl}#${iconName}`;
+            use.setAttribute('href', spriteReference);
+            use.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', spriteReference);
+            svg.appendChild(use);
+
+            iconDiv.appendChild(svg);
+
+            // Ensure task card is positioned relatively
+            taskCard.style.position = 'relative';
+
+            // Insert icon before content (so it appears in background)
+            const taskContent = taskCard.querySelector(selectors_js.GAME.TASK_CONTENT);
+            if (taskContent) {
+                taskContent.style.zIndex = '1';
+                taskContent.style.position = 'relative';
+            }
+
+            taskCard.appendChild(iconDiv);
+        }
+
+        /**
+         * Remove icons from task card
+         */
+        removeIcons(taskCard) {
+            const existingIcons = taskCard.querySelectorAll('.mwi-task-icon');
+            existingIcons.forEach((icon) => icon.remove());
+        }
+
+        /**
+         * Cleanup
+         */
+        cleanup() {
+            this.observers.forEach((unregister) => unregister());
+            this.observers = [];
+
+            // Remove sprite warning
+            this.removeSpriteWarning();
+
+            // Remove all icons and data attributes
+            document.querySelectorAll('.mwi-task-icon').forEach((icon) => icon.remove());
+            document.querySelectorAll('[data-mwi-task-processed]').forEach((card) => {
+                card.removeAttribute('data-mwi-task-processed');
+            });
+
+            // Clear caches
+            this.itemsByHrid = null;
+            this.actionsByHrid = null;
+            this.monstersByHrid = null;
+
+            this.timerRegistry.clearAll();
+
+            this.initialized = false;
+        }
+
+        /**
+         * Disable and cleanup (called by feature registry during character switch)
+         */
+        disable() {
+            if (this.characterSwitchingHandler) {
+                dataManager.off('character_switching', this.characterSwitchingHandler);
+                this.characterSwitchingHandler = null;
+            }
+
+            if (this.filterChangeHandler) {
+                document.removeEventListener('mwi-task-icon-filter-changed', this.filterChangeHandler);
+                this.filterChangeHandler = null;
+            }
+
+            // Run cleanup
+            this.cleanup();
+        }
+    }
+
+    const taskIcons = new TaskIcons();
+
+    /**
+     * Task Sorter
+     * Sorts tasks in the task board by skill type
+     */
+
+
+    class TaskSorter {
+        constructor() {
+            this.initialized = false;
+            this.sortButton = null;
+            this.unregisterObserver = null;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+
+            // Task type ordering (combat tasks go to bottom)
+            this.TASK_ORDER = {
+                Milking: 1,
+                Foraging: 2,
+                Woodcutting: 3,
+                Cheesesmithing: 4,
+                Crafting: 5,
+                Tailoring: 6,
+                Cooking: 7,
+                Brewing: 8,
+                Alchemy: 9,
+                Enhancing: 10,
+                Defeat: 99, // Combat tasks at bottom
+            };
+        }
+
+        /**
+         * Initialize the task sorter
+         */
+        initialize() {
+            if (this.initialized) return;
+
+            // Use DOM observer to watch for task panel appearing
+            this.watchTaskPanel();
+
+            this.initialized = true;
+        }
+
+        /**
+         * Watch for task panel to appear
+         */
+        watchTaskPanel() {
+            // Register observer for task panel header (watch for the class name, not the selector)
+            this.unregisterObserver = domObserver.onClass(
+                'TaskSorter',
+                'TasksPanel_taskSlotCount', // Just the class name, not [class*="..."]
+                (headerElement) => {
+                    this.addSortButton(headerElement);
+                }
+            );
+        }
+
+        /**
+         * Add sort button to task panel header
+         */
+        addSortButton(headerElement) {
+            // Check if button already exists
+            if (this.sortButton && document.contains(this.sortButton)) {
+                return;
+            }
+
+            // Create and insert sort button (skipped if user has chosen to hide it)
+            if (!config.getSetting('taskSorter_hideButton')) {
+                this.sortButton = document.createElement('button');
+                this.sortButton.className = 'Button_button__1Fe9z Button_small__3fqC7';
+                this.sortButton.textContent = 'Sort Tasks';
+                this.sortButton.style.marginLeft = '8px';
+                this.sortButton.setAttribute('data-mwi-task-sort', 'true');
+                this.sortButton.addEventListener('click', () => this.sortTasks());
+                headerElement.appendChild(this.sortButton);
+            }
+
+            // Add task icon filters if enabled
+            if (config.isFeatureEnabled('taskIcons')) {
+                taskIconFilters.addFilterBar(headerElement);
+            }
+
+            // Auto-sort if setting is enabled
+            if (config.getSetting('taskSorter_autoSort')) {
+                // Delay slightly to ensure all task cards are rendered
+                const autoSortTimeout = setTimeout(() => {
+                    this.sortTasks();
+                }, 100);
+                this.timerRegistry.registerTimeout(autoSortTimeout);
+            }
+        }
+
+        /**
+         * Parse task card to extract skill type and task name
+         */
+        parseTaskCard(taskCard) {
+            const nameElement = taskCard.querySelector('[class*="RandomTask_name"]');
+            if (!nameElement) return null;
+
+            const fullText = nameElement.textContent.trim();
+
+            // Format is "SkillType - TaskName"
+            const match = fullText.match(/^(.+?)\s*-\s*(.+)$/);
+            if (!match) return null;
+
+            const [, skillType, taskName] = match;
+
+            return {
+                skillType: skillType.trim(),
+                taskName: taskName.trim(),
+                fullText,
+            };
+        }
+
+        /**
+         * Check if task is completed (has Claim Reward button)
+         */
+        isTaskCompleted(taskCard) {
+            const claimButton = taskCard.querySelector('button.Button_button__1Fe9z.Button_buy__3s24l');
+            return claimButton && claimButton.textContent.includes('Claim Reward');
+        }
+
+        /**
+         * Get sort order for a task
+         */
+        getTaskOrder(taskCard) {
+            const parsed = this.parseTaskCard(taskCard);
+            if (!parsed) {
+                return { skillOrder: 999, taskName: '', isCombat: false, monsterSortIndex: 999, isCompleted: false };
+            }
+
+            const skillOrder = this.TASK_ORDER[parsed.skillType] || 999;
+            const isCombat = parsed.skillType === 'Defeat';
+            const isCompleted = this.isTaskCompleted(taskCard);
+
+            // For combat tasks, get monster sort index from game data
+            let monsterSortIndex = 999;
+            if (isCombat) {
+                // Extract monster name from task name (e.g., "Granite GolemZ9" -> "Granite Golem")
+                const monsterName = this.extractMonsterName(parsed.taskName);
+                if (monsterName) {
+                    const monsterHrid = dataManager.getMonsterHridFromName(monsterName);
+                    if (monsterHrid) {
+                        monsterSortIndex = dataManager.getMonsterSortIndex(monsterHrid);
+                    }
+                }
+            }
+
+            return {
+                skillOrder,
+                taskName: parsed.taskName,
+                skillType: parsed.skillType,
+                isCombat,
+                monsterSortIndex,
+                isCompleted,
+            };
+        }
+
+        /**
+         * Extract monster name from combat task name
+         * @param {string} taskName - Task name (e.g., "Granite Golem Z9")
+         * @returns {string|null} Monster name or null if not found
+         */
+        extractMonsterName(taskName) {
+            // Combat task format from parseTaskCard: "[Monster Name]Z[number]" (may or may not have space)
+            // Strip the zone suffix "Z\d+" from the end
+            const match = taskName.match(/^(.+?)\s*Z\d+$/);
+            if (match) {
+                return match[1].trim();
+            }
+
+            // Fallback: return as-is if no zone suffix found
+            return taskName.trim();
+        }
+
+        /**
+         * Compare two task cards by time to completion (ascending).
+         * Combat tasks and tasks with no profit data sort to the bottom,
+         * followed by completed tasks at the very bottom.
+         * Combat tasks among themselves are sorted by zone (same as skill sort).
+         */
+        compareTaskCardsByTime(cardA, cardB) {
+            const orderA = this.getTaskOrder(cardA);
+            const orderB = this.getTaskOrder(cardB);
+
+            // Completed tasks always last
+            if (orderA.isCompleted !== orderB.isCompleted) {
+                return orderA.isCompleted ? 1 : -1;
+            }
+
+            const profitA = cardA.querySelector(selectors_js.TOOLASHA.TASK_PROFIT);
+            const profitB = cardB.querySelector(selectors_js.TOOLASHA.TASK_PROFIT);
+            const secondsA = profitA?.dataset.completionSeconds ? parseFloat(profitA.dataset.completionSeconds) : null;
+            const secondsB = profitB?.dataset.completionSeconds ? parseFloat(profitB.dataset.completionSeconds) : null;
+
+            const noTimeA = secondsA === null || orderA.isCombat;
+            const noTimeB = secondsB === null || orderB.isCombat;
+
+            // No-time tasks (combat, unknown) after timed tasks
+            if (noTimeA !== noTimeB) {
+                return noTimeA ? 1 : -1;
+            }
+
+            // Both have no time — fall back to skill/zone sort among themselves
+            if (noTimeA && noTimeB) {
+                return this.compareTaskCards(cardA, cardB);
+            }
+
+            // Both have time — sort ascending
+            return secondsA - secondsB;
+        }
+
+        /**
+         * Compare two task cards for sorting
+         */
+        compareTaskCards(cardA, cardB) {
+            const orderA = this.getTaskOrder(cardA);
+            const orderB = this.getTaskOrder(cardB);
+
+            // First: Sort by completion status (incomplete tasks first, completed tasks last)
+            if (orderA.isCompleted !== orderB.isCompleted) {
+                return orderA.isCompleted ? 1 : -1;
+            }
+
+            // Second: Sort by skill type (combat vs non-combat)
+            if (orderA.skillOrder !== orderB.skillOrder) {
+                return orderA.skillOrder - orderB.skillOrder;
+            }
+
+            // Third: Within combat tasks, sort by zone progression (sortIndex)
+            if (orderA.isCombat && orderB.isCombat) {
+                if (orderA.monsterSortIndex !== orderB.monsterSortIndex) {
+                    return orderA.monsterSortIndex - orderB.monsterSortIndex;
+                }
+            }
+
+            // Fourth: Within same skill type (or same zone for combat), sort alphabetically by task name
+            return orderA.taskName.localeCompare(orderB.taskName);
+        }
+
+        /**
+         * Sort all tasks in the task board
+         */
+        sortTasks() {
+            const taskList = document.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskList) {
+                return;
+            }
+
+            // Get all task cards
+            const taskCards = Array.from(taskList.querySelectorAll(selectors_js.GAME.TASK_CARD));
+            if (taskCards.length === 0) {
+                return;
+            }
+
+            // Sort the cards
+            const sortMode = config.getSettingValue('taskSorter_sortMode', 'skill');
+            if (sortMode === 'time') {
+                taskCards.sort((a, b) => this.compareTaskCardsByTime(a, b));
+            } else {
+                taskCards.sort((a, b) => this.compareTaskCards(a, b));
+            }
+
+            // Re-append in sorted order
+            taskCards.forEach((card) => taskList.appendChild(card));
+
+            // After sorting, React may re-render task cards and remove our icons
+            // Clear the processed markers and force icon re-processing
+            if (config.isFeatureEnabled('taskIcons')) {
+                // Use taskIcons module's method to clear markers
+                taskIcons.clearAllProcessedMarkers();
+
+                // Trigger icon re-processing
+                // Use setTimeout to ensure React has finished any re-rendering
+                const iconTimeout = setTimeout(() => {
+                    taskIcons.processAllTaskCards();
+                }, 100);
+                this.timerRegistry.registerTimeout(iconTimeout);
+            }
+        }
+
+        /**
+         * Cleanup
+         */
+        cleanup() {
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            if (this.sortButton && document.contains(this.sortButton)) {
+                this.sortButton.remove();
+            }
+            this.sortButton = null;
+            this.timerRegistry.clearAll();
+            this.initialized = false;
+        }
+
+        disable() {
+            this.cleanup();
+        }
+    }
+
+    const taskSorter = new TaskSorter();
+
+    /**
+     * Number Parser Utility
+     * Shared utilities for parsing numeric values from text, including item counts
+     */
+
+    /**
+     * Parse item count from text
+     * Handles various formats including:
+     * - Plain numbers: "100", "1000"
+     * - K/M suffixes: "1.5K", "2M"
+     * - International formats with separators: "1,000", "1 000", "1.000"
+     * - Mixed decimal formats: "1.234,56" (European) or "1,234.56" (US)
+     * - Prefixed formats: "x5", "Amount: 1000", "Amount: 1 000"
+     *
+     * @param {string} text - Text containing a number
+     * @param {number} defaultValue - Value to return if parsing fails (default: 1)
+     * @returns {number} Parsed numeric value
+     */
+    function parseItemCount(text, defaultValue = 1) {
+        if (!text) {
+            return defaultValue;
+        }
+
+        // Convert to string and normalize
+        text = String(text).toLowerCase().trim();
+
+        // Extract number from common patterns like "x5", "Amount: 1000"
+        const prefixMatch = text.match(/x([\d,\s.kmb]+)|amount:\s*([\d,\s.kmb]+)/i);
+        if (prefixMatch) {
+            text = prefixMatch[1] || prefixMatch[2];
+        }
+
+        // Determine whether periods and commas are thousands separators or decimal points.
+        // Rules:
+        // 1. If both exist: the one appearing first (or multiple times) is the thousands separator.
+        //    e.g. "1.234,56" → period is thousands, comma is decimal → 1234.56
+        //    e.g. "1,234.56" → comma is thousands, period is decimal → 1234.56
+        // 2. If only commas exist and comma is followed by exactly 3 digits at end: thousands separator.
+        //    e.g. "1,234" → 1234
+        // 3. If only periods exist and period is followed by exactly 3 digits at end: thousands separator.
+        //    e.g. "1.234" → 1234
+        // 4. Otherwise treat as decimal separator.
+        //    e.g. "1.5" → 1.5,  "1,5" → 1.5
+
+        const hasPeriod = text.includes('.');
+        const hasComma = text.includes(',');
+
+        if (hasPeriod && hasComma) {
+            // Both present — whichever comes last is the decimal separator
+            const lastPeriod = text.lastIndexOf('.');
+            const lastComma = text.lastIndexOf(',');
+            if (lastPeriod > lastComma) {
+                // Period is decimal: remove commas as thousands separators
+                text = text.replace(/,/g, '');
+            } else {
+                // Comma is decimal: remove periods as thousands separators, replace comma with period
+                text = text.replace(/\./g, '').replace(',', '.');
+            }
+        } else if (hasComma) {
+            // Only commas: thousands separator if followed by exactly 3 digits at end, else decimal
+            if (/,\d{3}$/.test(text)) {
+                text = text.replace(/,/g, '');
+            } else {
+                text = text.replace(',', '.');
+            }
+        } else if (hasPeriod) {
+            // Only periods: thousands separator if followed by exactly 3 digits at end, else decimal
+            if (/\.\d{3}$/.test(text)) {
+                text = text.replace(/\./g, '');
+            }
+            // else leave as-is (valid decimal like "1.5")
+        }
+
+        // Remove remaining whitespace separators
+        text = text.replace(/\s/g, '');
+
+        // Handle K/M/B suffixes (must end with the suffix letter)
+        if (/\d[kmb]$/.test(text)) {
+            if (text.endsWith('k')) {
+                return parseFloat(text) * 1000;
+            } else if (text.endsWith('m')) {
+                return parseFloat(text) * 1000000;
+            } else if (text.endsWith('b')) {
+                return parseFloat(text) * 1000000000;
+            }
+        }
+
+        // Parse plain number
+        const parsed = parseFloat(text);
+        return isNaN(parsed) ? defaultValue : parsed;
+    }
+
+    /**
+     * Task Inventory Highlighter
+     * Dims inventory items that are NOT needed for current non-combat tasks
+     */
+
+
+    class TaskInventoryHighlighter {
+        constructor() {
+            this.initialized = false;
+            this.highlightButton = null;
+            this.unregisterObserver = null;
+            this.isHighlightActive = false;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.neededItems = new Map(); // Map<itemHrid, quantity>
+        }
+
+        /**
+         * Initialize the feature
+         */
+        initialize() {
+            if (this.initialized) return;
+
+            // Watch for task panel header to add button
+            this.watchTaskPanel();
+
+            this.initialized = true;
+        }
+
+        /**
+         * Watch for task panel to appear
+         */
+        watchTaskPanel() {
+            this.unregisterObserver = domObserver.onClass(
+                'TaskInventoryHighlighter',
+                'TasksPanel_taskSlotCount',
+                (headerElement) => {
+                    this.addHighlightButton(headerElement);
+                }
+            );
+        }
+
+        /**
+         * Add highlight button to task panel header
+         */
+        addHighlightButton(headerElement) {
+            // Check if button already exists
+            if (this.highlightButton && document.contains(this.highlightButton)) {
+                return;
+            }
+
+            // Create button
+            this.highlightButton = document.createElement('button');
+            this.highlightButton.className = 'Button_button__1Fe9z Button_small__3fqC7';
+            this.highlightButton.textContent = 'Highlight Task Items';
+            this.highlightButton.style.marginLeft = '8px';
+            this.highlightButton.setAttribute('data-mwi-task-highlight', 'true');
+
+            // Button click handler
+            this.highlightButton.addEventListener('click', () => this.toggleHighlight());
+
+            // Insert after Sort Tasks button if it exists, otherwise append
+            const sortButton = headerElement.querySelector('[data-mwi-task-sort]');
+            if (sortButton) {
+                sortButton.after(this.highlightButton);
+            } else {
+                headerElement.appendChild(this.highlightButton);
+            }
+        }
+
+        /**
+         * Toggle inventory highlighting on/off
+         */
+        async toggleHighlight() {
+            if (this.isHighlightActive) {
+                this.clearHighlight();
+            } else {
+                await this.applyHighlight();
+            }
+        }
+
+        /**
+         * Apply highlighting to inventory
+         */
+        async applyHighlight() {
+            // Calculate needed materials from all tasks
+            await this.calculateNeededMaterials();
+
+            // Apply opacity to inventory items
+            this.applyInventoryOpacity();
+
+            // Update button state
+            this.isHighlightActive = true;
+            this.highlightButton.textContent = 'Clear Highlight';
+            this.highlightButton.style.backgroundColor = '#22c55e';
+        }
+
+        /**
+         * Clear inventory highlighting
+         */
+        clearHighlight() {
+            // Reset all inventory item opacities
+            const inventoryItems = document.querySelectorAll('[class*="Inventory_items"] [class*="Item_item"]');
+            for (const item of inventoryItems) {
+                item.style.opacity = '';
+            }
+
+            // Clear needed items map
+            this.neededItems.clear();
+
+            // Update button state
+            this.isHighlightActive = false;
+            this.highlightButton.textContent = 'Highlight Task Items';
+            this.highlightButton.style.backgroundColor = '';
+        }
+
+        /**
+         * Calculate materials needed for all non-combat tasks
+         */
+        async calculateNeededMaterials() {
+            this.neededItems.clear();
+
+            // Get task list container
+            const taskListNode = document.querySelector(selectors_js.GAME.TASK_LIST);
+            if (!taskListNode) {
+                return;
+            }
+
+            // Get all task info nodes
+            const taskNodes = taskListNode.querySelectorAll(selectors_js.GAME.TASK_INFO);
+
+            for (const taskNode of taskNodes) {
+                const taskData = this.parseTaskCard(taskNode);
+
+                if (!taskData || taskData.isCombat) {
+                    continue; // Skip combat tasks
+                }
+
+                // Calculate profit data (which includes material costs)
+                const profitData = await calculateTaskProfit(taskData);
+
+                if (!profitData || !profitData.action) {
+                    continue;
+                }
+
+                // Extract materials from profitData
+                this.extractMaterialsFromProfitData(profitData);
+            }
+        }
+
+        /**
+         * Extract required materials from profit calculation data
+         * @param {Object} profitData - Profit calculation result
+         */
+        extractMaterialsFromProfitData(profitData) {
+            const action = profitData.action;
+            const quantity = action.breakdown?.quantity || 0;
+
+            if (quantity <= 0) {
+                return;
+            }
+
+            const details = action.details;
+            if (!details) {
+                return;
+            }
+
+            // Extract materials from production tasks (materialCosts)
+            if (details.materialCosts) {
+                for (const material of details.materialCosts) {
+                    if (!material.itemHrid) {
+                        continue;
+                    }
+
+                    // Material amount is per-action, multiply by task quantity
+                    const neededQty = material.amount * quantity;
+
+                    // Add to needed items map
+                    const currentQty = this.neededItems.get(material.itemHrid) || 0;
+                    this.neededItems.set(material.itemHrid, currentQty + neededQty);
+                }
+            }
+
+            // Extract tea/drink costs (teaCosts are per hour, need to calculate hours)
+            if (details.teaCosts && details.teaCosts.length > 0) {
+                // Calculate hours needed for task
+                const actionsPerHour = details.actionsPerHour || 0;
+                const efficiencyMultiplier = details.efficiencyMultiplier || 1;
+                const effectiveActionsPerHour = actionsPerHour * efficiencyMultiplier;
+                const hoursNeeded = effectiveActionsPerHour > 0 ? quantity / effectiveActionsPerHour : 0;
+
+                for (const tea of details.teaCosts) {
+                    if (!tea.itemHrid) {
+                        continue;
+                    }
+
+                    const neededQty = tea.drinksPerHour * hoursNeeded;
+                    const currentQty = this.neededItems.get(tea.itemHrid) || 0;
+                    this.neededItems.set(tea.itemHrid, currentQty + neededQty);
+                }
+            }
+        }
+
+        /**
+         * Apply opacity to inventory items based on needed materials
+         */
+        applyInventoryOpacity() {
+            // Query all inventory items (Item_itemContainer contains the item)
+            const inventoryItems = document.querySelectorAll('[class*="Inventory_items"] [class*="Item_itemContainer"]');
+
+            for (const itemContainer of inventoryItems) {
+                const itemHrid = this.getItemHridFromContainer(itemContainer);
+
+                if (!itemHrid) {
+                    continue;
+                }
+
+                // Get the icon element to apply opacity
+                const iconElement = itemContainer.querySelector('[class*="Item_item"]');
+                if (!iconElement) {
+                    continue;
+                }
+
+                // If item is NOT needed for tasks, dim it
+                if (!this.neededItems.has(itemHrid)) {
+                    iconElement.style.opacity = '0.25';
+                } else {
+                    // Item IS needed, keep full opacity
+                    iconElement.style.opacity = '1';
+                }
+            }
+        }
+
+        /**
+         * Get item HRID from inventory item container element
+         * @param {HTMLElement} itemContainer - Inventory item container element
+         * @returns {string|null} Item HRID or null
+         */
+        getItemHridFromContainer(itemContainer) {
+            // Find the <use> element inside the container's SVG
+            const useElement = itemContainer.querySelector('svg use');
+            if (!useElement) {
+                return null;
+            }
+
+            const href = useElement.getAttribute('href');
+            if (!href) {
+                return null;
+            }
+
+            // Extract item name from href (e.g., #radiant_fiber)
+            const match = href.match(/#(.+)$/);
+            if (!match) {
+                return null;
+            }
+
+            const itemName = match[1];
+            const itemHrid = `/items/${itemName}`;
+            return itemHrid;
+        }
+
+        /**
+         * Parse task node to extract task data
+         * @param {HTMLElement} taskNode - Task info node element
+         * @returns {Object|null} Task data or null
+         */
+        parseTaskCard(taskNode) {
+            // Get task description
+            const nameNode = taskNode.querySelector(selectors_js.GAME.TASK_NAME_DIV);
+            if (!nameNode) {
+                return null;
+            }
+
+            const description = nameNode.textContent.trim();
+
+            // Check if combat task (contains "Defeat")
+            const isCombat = description.includes('Defeat');
+
+            // Get quantity from progress (plain div with text "Progress: 0 / 1562")
+            let quantity = 0;
+            let currentProgress = 0;
+            const taskInfoDivs = taskNode.querySelectorAll('div');
+            for (const div of taskInfoDivs) {
+                const text = div.textContent.trim();
+                if (text.startsWith('Progress:')) {
+                    const progressMatch = text.match(/(\d+)\s*\/\s*(\d+)/);
+                    if (progressMatch) {
+                        currentProgress = parseInt(progressMatch[1], 10);
+                        quantity = parseInt(progressMatch[2], 10);
+                    }
+                    break;
+                }
+            }
+
+            // Get rewards
+            const rewardsNode = taskNode.querySelector(selectors_js.GAME.TASK_REWARDS);
+            if (!rewardsNode) {
+                return null;
+            }
+
+            let coinReward = 0;
+            let taskTokenReward = 0;
+
+            const itemContainers = rewardsNode.querySelectorAll(selectors_js.GAME.ITEM_CONTAINER);
+
+            for (const container of itemContainers) {
+                const useElement = container.querySelector('use');
+                if (!useElement) continue;
+
+                const href = useElement.href.baseVal;
+
+                if (href.includes('coin')) {
+                    const countNode = container.querySelector(selectors_js.GAME.ITEM_COUNT);
+                    if (countNode) {
+                        coinReward = parseItemCount(countNode.textContent, 0);
+                    }
+                } else if (href.includes('task_token')) {
+                    const countNode = container.querySelector(selectors_js.GAME.ITEM_COUNT);
+                    if (countNode) {
+                        taskTokenReward = parseItemCount(countNode.textContent, 0);
+                    }
+                }
+            }
+
+            return {
+                description,
+                coinReward,
+                taskTokenReward,
+                quantity,
+                currentProgress,
+                isCombat,
+            };
+        }
+
+        /**
+         * Cleanup when disabled
+         */
+        cleanup() {
+            this.clearHighlight();
+
+            if (this.unregisterObserver) {
+                this.unregisterObserver();
+                this.unregisterObserver = null;
+            }
+
+            if (this.highlightButton && this.highlightButton.parentElement) {
+                this.highlightButton.remove();
+            }
+
+            this.highlightButton = null;
+            this.timerRegistry.clearAll();
+            this.initialized = false;
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            this.cleanup();
+        }
+    }
+
+    const taskInventoryHighlighter = new TaskInventoryHighlighter();
+
+    /**
+     * Task Statistics
+     * Adds a Statistics button to the Tasks panel tab bar
+     * Shows task overflow time, expected rewards, and completion estimates
+     */
+
+
+    class TaskStatistics {
+        constructor() {
+            this.isInitialized = false;
+            this.overlay = null;
+            this.unregisterHandlers = [];
+        }
+
+        /**
+         * Setup setting change listener (always active)
+         */
+        setupSettingListener() {
+            config.onSettingChange('taskStatistics', (enabled) => {
+                if (enabled) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+        }
+
+        /**
+         * Initialize the task statistics feature
+         */
+        initialize() {
+            if (!config.getSetting('taskStatistics')) {
+                return;
+            }
+
+            if (this.isInitialized) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Try to inject button immediately
+            this.injectButton();
+
+            // Watch for Tasks panel appearing
+            const unregister = domObserver.onClass('TaskStatistics', 'TasksPanel_tabsComponentContainer', () => {
+                this.injectButton();
+            });
+            this.unregisterHandlers.push(unregister);
+        }
+
+        /**
+         * Inject Statistics button into Tasks panel tab bar
+         */
+        injectButton() {
+            // Find the tab container within the Tasks panel
+            const tabsComponentContainer = document.querySelector('[class*="TasksPanel_tabsComponentContainer"]');
+            if (!tabsComponentContainer) {
+                return;
+            }
+
+            const tabsContainer = tabsComponentContainer.querySelector(
+                '[class*="TabsComponent_tabsContainer"] > div > div > div'
+            );
+            if (!tabsContainer) {
+                return;
+            }
+
+            // Check if button already exists
+            if (tabsContainer.querySelector(selectors_js.TOOLASHA.TASK_STATS_BTN)) {
+                return;
+            }
+
+            // Create button matching MUI tab styling
+            const button = document.createElement('div');
+            button.className = 'MuiButtonBase-root MuiTab-root MuiTab-textColorPrimary css-1q2h7u5 toolasha-task-stats-btn';
+            button.textContent = 'Statistics';
+            button.style.cursor = 'pointer';
+            button.onclick = () => this.showPopup();
+
+            // Insert after last tab
+            const lastTab = tabsContainer.children[tabsContainer.children.length - 1];
+            tabsContainer.insertBefore(button, lastTab.nextSibling);
+        }
+
+        /**
+         * Remove Statistics button
+         */
+        removeButton() {
+            const buttons = document.querySelectorAll(selectors_js.TOOLASHA.TASK_STATS_BTN);
+            for (const button of buttons) {
+                button.remove();
+            }
+        }
+
+        /**
+         * Show statistics popup
+         */
+        async showPopup() {
+            // Close any existing popup
+            this.closePopup();
+
+            // Ensure market data is loaded for token valuation
+            if (!marketAPI.isLoaded()) {
+                await marketAPI.fetch();
+            }
+
+            const statsData = await this.calculateAllStatistics();
+            this.createPopup(statsData);
+        }
+
+        /**
+         * Calculate all statistics
+         * @returns {Object} Statistics data
+         */
+        async calculateAllStatistics() {
+            const overflowData = this.calculateOverflowTime();
+            const slotStatus = this.calculateSlotStatus();
+            const rewardsSummary = await this.calculateRewardsSummary();
+
+            return {
+                overflow: overflowData,
+                slots: slotStatus,
+                rewards: rewardsSummary,
+            };
+        }
+
+        /**
+         * Get active random tasks from characterQuests
+         * @returns {Array} Active random task quests
+         */
+        getActiveTasks() {
+            return (dataManager.characterQuests || []).filter(
+                (q) => q.category === '/quest_category/random_task' && q.status === '/quest_status/in_progress'
+            );
+        }
+
+        /**
+         * Calculate task overflow time
+         * @returns {Object} Overflow time data
+         */
+        calculateOverflowTime() {
+            const characterInfo = dataManager.characterData?.characterInfo;
+            if (!characterInfo) {
+                return { error: 'Character info not available' };
+            }
+
+            const taskSlotCap = characterInfo.taskSlotCap;
+            const taskCooldownHours = characterInfo.taskCooldownHours;
+            const lastTaskTimestamp = characterInfo.lastTaskTimestamp;
+            const unreadTaskCount = characterInfo.unreadTaskCount || 0;
+            const activeTaskCount = this.getActiveTasks().length;
+
+            const taskCount = unreadTaskCount + activeTaskCount;
+            const availableSlots = taskSlotCap - taskCount;
+            const taskCooldownMs = taskCooldownHours * 3.6e6;
+            const lastTaskDate = new Date(lastTaskTimestamp).getTime();
+            const overflowDate = new Date(lastTaskDate + (availableSlots + 1) * taskCooldownMs);
+
+            const now = Date.now();
+            const msUntilOverflow = overflowDate.getTime() - now;
+
+            return {
+                overflowDate,
+                msUntilOverflow,
+                isOverflowing: msUntilOverflow <= 0,
+                taskSlotCap,
+                taskCooldownHours,
+                usedSlots: taskCount,
+                availableSlots,
+            };
+        }
+
+        /**
+         * Calculate slot status
+         * @returns {Object} Slot status data
+         */
+        calculateSlotStatus() {
+            const characterInfo = dataManager.characterData?.characterInfo;
+            if (!characterInfo) {
+                return { error: 'Character info not available' };
+            }
+
+            const unreadTaskCount = characterInfo.unreadTaskCount || 0;
+            const activeTaskCount = this.getActiveTasks().length;
+
+            return {
+                used: unreadTaskCount + activeTaskCount,
+                total: characterInfo.taskSlotCap,
+                unread: unreadTaskCount,
+                active: activeTaskCount,
+            };
+        }
+
+        /**
+         * Calculate aggregated rewards summary across all active tasks
+         * @returns {Object} Rewards summary
+         */
+        async calculateRewardsSummary() {
+            const activeTasks = this.getActiveTasks();
+
+            let totalCoins = 0;
+            let totalTokens = 0;
+            const taskDetails = [];
+
+            // Parse rewards from itemRewardsJSON
+            for (const quest of activeTasks) {
+                let coinReward = 0;
+                let tokenReward = 0;
+
+                if (quest.itemRewardsJSON) {
+                    try {
+                        const rewards = JSON.parse(quest.itemRewardsJSON);
+                        for (const reward of rewards) {
+                            if (reward.itemHrid === '/items/coin') {
+                                coinReward = reward.count;
+                            } else if (reward.itemHrid === '/items/task_token') {
+                                tokenReward = reward.count;
+                            }
+                        }
+                    } catch (error) {
+                        console.error('[TaskStatistics] Failed to parse itemRewardsJSON:', error);
+                    }
+                }
+
+                totalCoins += coinReward;
+                totalTokens += tokenReward;
+
+                // Determine task type and description
+                const isCombat = quest.type === '/quest_type/monster';
+                const actionHrid = quest.actionHrid || '';
+                const monsterHrid = quest.monsterHrid || '';
+
+                // Get display name
+                let taskName = '';
+                if (isCombat && monsterHrid) {
+                    const monsterDetails = dataManager.getInitClientData()?.combatMonsterDetailMap?.[monsterHrid];
+                    taskName = monsterDetails?.name || monsterHrid.split('/').pop();
+                } else if (actionHrid) {
+                    const actionDetails = dataManager.getInitClientData()?.actionDetailMap?.[actionHrid];
+                    taskName = actionDetails?.name || actionHrid.split('/').pop();
+                }
+
+                // Calculate action profit for non-combat tasks
+                let actionProfit = null;
+                let completionSeconds = null;
+
+                if (!isCombat && actionHrid) {
+                    try {
+                        // Get action details to build proper task description
+                        const actionDetails = dataManager.getInitClientData()?.actionDetailMap?.[actionHrid];
+                        if (actionDetails) {
+                            // Build description in format "Skill - Action Name"
+                            // Extract skill name from type field like '/action_types/foraging'
+                            const skillName = actionDetails.type?.split('/').pop() || '';
+                            const formattedSkill =
+                                skillName.charAt(0).toUpperCase() + skillName.slice(1).replace(/_/g, ' ');
+                            const actionName = actionDetails.name;
+                            const description = `${formattedSkill} - ${actionName}`;
+
+                            const taskData = {
+                                description,
+                                coinReward,
+                                taskTokenReward: tokenReward,
+                                quantity: quest.goalCount,
+                                currentProgress: quest.currentCount || 0,
+                            };
+                            const profitData = await calculateTaskProfit(taskData);
+                            if (profitData && profitData.action) {
+                                actionProfit = profitData.action.totalValue || profitData.action.totalProfit || 0;
+                                completionSeconds = calculateTaskCompletionSeconds(profitData);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('[TaskStatistics] Failed to calculate profit for task:', taskName, error);
+                    }
+                }
+
+                taskDetails.push({
+                    name: taskName,
+                    isCombat,
+                    coinReward,
+                    tokenReward,
+                    actionProfit,
+                    completionSeconds,
+                    goalCount: quest.goalCount,
+                    currentCount: quest.currentCount || 0,
+                });
+            }
+
+            // Token valuation
+            const tokenValue = calculateTaskTokenValue();
+            const rewardValue = calculateTaskRewardValue(totalCoins, totalTokens);
+
+            // Sum action profits
+            let totalActionProfit = 0;
+            let totalCompletionSeconds = 0;
+            let hasActionProfit = false;
+
+            for (const detail of taskDetails) {
+                if (detail.actionProfit !== null) {
+                    totalActionProfit += detail.actionProfit;
+                    hasActionProfit = true;
+                }
+                if (detail.completionSeconds !== null) {
+                    totalCompletionSeconds += detail.completionSeconds;
+                }
+            }
+
+            return {
+                totalCoins,
+                totalTokens,
+                tokenValue,
+                rewardValue,
+                totalActionProfit: hasActionProfit ? totalActionProfit : null,
+                totalCompletionSeconds: totalCompletionSeconds > 0 ? totalCompletionSeconds : null,
+                combinedTotal: rewardValue.total + (hasActionProfit ? totalActionProfit : 0),
+                taskDetails,
+            };
+        }
+
+        /**
+         * Create and display the statistics popup
+         * @param {Object} statsData - Calculated statistics data
+         */
+        createPopup(statsData) {
+            const textColor = config.COLOR_TEXT_PRIMARY;
+
+            // Create overlay
+            const overlay = document.createElement('div');
+            overlay.className = 'toolasha-task-stats-overlay';
+            overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+            // Create popup container
+            const popup = document.createElement('div');
+            popup.style.cssText = `
+            background: #1a1a1a;
+            border: 2px solid #3a3a3a;
+            border-radius: 8px;
+            padding: 20px;
+            max-width: 500px;
+            max-height: 90%;
+            overflow-y: auto;
+            color: ${textColor};
+            min-width: 360px;
+        `;
+
+            // Header
+            const header = document.createElement('div');
+            header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #3a3a3a;
+            padding-bottom: 10px;
+        `;
+
+            const title = document.createElement('h2');
+            title.textContent = 'Task Statistics';
+            title.style.cssText = `margin: 0; color: ${textColor}; font-size: 24px;`;
+
+            const closeButton = document.createElement('button');
+            closeButton.textContent = '\u00d7';
+            closeButton.style.cssText = `
+            background: none;
+            border: none;
+            color: ${textColor};
+            font-size: 32px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        `;
+            closeButton.onclick = () => this.closePopup();
+
+            header.appendChild(title);
+            header.appendChild(closeButton);
+            popup.appendChild(header);
+
+            // Content sections
+            popup.appendChild(this.createOverflowSection(statsData.overflow, textColor));
+            popup.appendChild(this.createRewardsSection(statsData.rewards, textColor));
+            popup.appendChild(this.createActionProfitSection(statsData.rewards));
+            popup.appendChild(this.createCompletionTimeSection(statsData.rewards, textColor));
+
+            // Close on overlay click
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    this.closePopup();
+                }
+            };
+
+            overlay.appendChild(popup);
+            document.body.appendChild(overlay);
+            this.overlay = overlay;
+        }
+
+        /**
+         * Create a section card element
+         * @param {string} titleText - Section title
+         * @returns {HTMLElement} Section container
+         */
+        createSection(titleText) {
+            const section = document.createElement('div');
+            section.style.cssText = `
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 12px;
+        `;
+
+            const sectionTitle = document.createElement('div');
+            sectionTitle.textContent = titleText;
+            sectionTitle.style.cssText = `
+            color: ${config.COLOR_ACCENT};
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        `;
+            section.appendChild(sectionTitle);
+
+            return section;
+        }
+
+        /**
+         * Create a row with label and value
+         * @param {string} label - Row label
+         * @param {string} value - Row value
+         * @param {string} valueColor - Value text color
+         * @returns {HTMLElement} Row element
+         */
+        createRow(label, value, valueColor = config.COLOR_TEXT_PRIMARY) {
+            const row = document.createElement('div');
+            row.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 3px 0;
+            font-size: 13px;
+        `;
+
+            const labelSpan = document.createElement('span');
+            labelSpan.textContent = label;
+            labelSpan.style.color = config.COLOR_TEXT_SECONDARY;
+
+            const valueSpan = document.createElement('span');
+            valueSpan.textContent = value;
+            valueSpan.style.color = valueColor;
+
+            row.appendChild(labelSpan);
+            row.appendChild(valueSpan);
+
+            return row;
+        }
+
+        /**
+         * Create overflow time section
+         * @param {Object} overflow - Overflow data
+         * @param {string} textColor - Text color
+         * @returns {HTMLElement} Section element
+         */
+        createOverflowSection(overflow, textColor) {
+            const section = this.createSection('Task Slots');
+
+            if (overflow.error) {
+                section.appendChild(this.createRow('Status', overflow.error, config.COLOR_LOSS));
+                return section;
+            }
+
+            section.appendChild(this.createRow('Slots Used', `${overflow.usedSlots} / ${overflow.taskSlotCap}`, textColor));
+            section.appendChild(this.createRow('Available', `${overflow.availableSlots}`, textColor));
+            section.appendChild(
+                this.createRow('Cooldown', `${overflow.taskCooldownHours}h per task`, config.COLOR_TEXT_SECONDARY)
+            );
+
+            // Overflow time
+            if (overflow.isOverflowing) {
+                section.appendChild(this.createRow('Status', 'Tasks full!', config.COLOR_LOSS));
+            } else {
+                const overflowTimeStr = formatters_js.timeReadable(overflow.msUntilOverflow / 1000);
+                const overflowDateStr = overflow.overflowDate.toLocaleString();
+                section.appendChild(this.createRow('Full in', overflowTimeStr, config.COLOR_INFO));
+                section.appendChild(this.createRow('Full at', overflowDateStr, config.COLOR_TEXT_SECONDARY));
+            }
+
+            return section;
+        }
+
+        /**
+         * Create rewards summary section
+         * @param {Object} rewards - Rewards data
+         * @param {string} textColor - Text color
+         * @returns {HTMLElement} Section element
+         */
+        createRewardsSection(rewards, textColor) {
+            const section = this.createSection('Expected Rewards');
+
+            section.appendChild(this.createRow('Total Coins', formatters_js.numberFormatter(rewards.totalCoins), config.COLOR_GOLD));
+            section.appendChild(this.createRow('Total Task Tokens', String(rewards.totalTokens), textColor));
+
+            if (!rewards.rewardValue.error) {
+                const tokenValueStr = `${formatters_js.numberFormatter(Math.round(rewards.rewardValue.breakdown.tokenValue))} each`;
+                section.appendChild(this.createRow('Token Value', tokenValueStr, config.COLOR_TEXT_SECONDARY));
+                section.appendChild(
+                    this.createRow(
+                        'Tokens Value',
+                        formatters_js.numberFormatter(Math.round(rewards.rewardValue.taskTokens)),
+                        config.COLOR_PROFIT
+                    )
+                );
+                section.appendChild(
+                    this.createRow(
+                        "Purple's Gift",
+                        formatters_js.numberFormatter(Math.round(rewards.rewardValue.purpleGift)),
+                        config.COLOR_ESSENCE
+                    )
+                );
+
+                // Separator
+                const separator = document.createElement('div');
+                separator.style.cssText = 'border-top: 1px solid #3a3a3a; margin: 6px 0;';
+                section.appendChild(separator);
+
+                section.appendChild(
+                    this.createRow(
+                        'Total Reward Value',
+                        formatters_js.numberFormatter(Math.round(rewards.rewardValue.total)),
+                        config.COLOR_ACCENT
+                    )
+                );
+            } else {
+                section.appendChild(this.createRow('Token Value', 'Loading...', config.COLOR_TEXT_SECONDARY));
+            }
+
+            return section;
+        }
+
+        /**
+         * Create action profit section with per-task breakdown
+         * @param {Object} rewards - Rewards data with task details
+         * @returns {HTMLElement} Section element
+         */
+        createActionProfitSection(rewards) {
+            const section = this.createSection('Action Profit');
+
+            for (const detail of rewards.taskDetails) {
+                const profitStr = detail.isCombat
+                    ? 'N/A (combat)'
+                    : detail.actionProfit !== null
+                      ? formatters_js.numberFormatter(Math.round(detail.actionProfit))
+                      : 'N/A';
+
+                const profitColor = detail.isCombat
+                    ? config.COLOR_TEXT_SECONDARY
+                    : detail.actionProfit !== null && detail.actionProfit >= 0
+                      ? config.COLOR_PROFIT
+                      : detail.actionProfit !== null
+                        ? config.COLOR_LOSS
+                        : config.COLOR_TEXT_SECONDARY;
+
+                section.appendChild(this.createRow(detail.name, profitStr, profitColor));
+            }
+
+            // Separator and total
+            const separator = document.createElement('div');
+            separator.style.cssText = 'border-top: 1px solid #3a3a3a; margin: 6px 0;';
+            section.appendChild(separator);
+
+            const totalStr =
+                rewards.totalActionProfit !== null ? formatters_js.numberFormatter(Math.round(rewards.totalActionProfit)) : 'N/A';
+            const totalColor =
+                rewards.totalActionProfit !== null && rewards.totalActionProfit >= 0
+                    ? config.COLOR_PROFIT
+                    : rewards.totalActionProfit !== null
+                      ? config.COLOR_LOSS
+                      : config.COLOR_TEXT_SECONDARY;
+
+            section.appendChild(this.createRow('Total Action Profit', totalStr, totalColor));
+
+            // Combined total
+            const separator2 = document.createElement('div');
+            separator2.style.cssText = 'border-top: 1px solid #3a3a3a; margin: 6px 0;';
+            section.appendChild(separator2);
+
+            section.appendChild(
+                this.createRow('Combined Total', formatters_js.numberFormatter(Math.round(rewards.combinedTotal)), config.COLOR_ACCENT)
+            );
+
+            return section;
+        }
+
+        /**
+         * Create completion time section
+         * @param {Object} rewards - Rewards data with task details
+         * @param {string} textColor - Text color
+         * @returns {HTMLElement} Section element
+         */
+        createCompletionTimeSection(rewards, textColor) {
+            const section = this.createSection('Completion Time');
+
+            for (const detail of rewards.taskDetails) {
+                const timeStr = detail.isCombat
+                    ? 'N/A (combat)'
+                    : detail.completionSeconds !== null
+                      ? formatters_js.timeReadable(detail.completionSeconds)
+                      : 'N/A';
+
+                const progressStr = detail.currentCount > 0 ? ` (${detail.currentCount}/${detail.goalCount})` : '';
+
+                section.appendChild(
+                    this.createRow(
+                        detail.name + progressStr,
+                        timeStr,
+                        detail.isCombat ? config.COLOR_TEXT_SECONDARY : textColor
+                    )
+                );
+            }
+
+            // Separator and total
+            const separator = document.createElement('div');
+            separator.style.cssText = 'border-top: 1px solid #3a3a3a; margin: 6px 0;';
+            section.appendChild(separator);
+
+            const totalTimeStr =
+                rewards.totalCompletionSeconds !== null ? formatters_js.timeReadable(rewards.totalCompletionSeconds) : 'N/A';
+
+            section.appendChild(this.createRow('Total (non-combat)', totalTimeStr, config.COLOR_INFO));
+
+            return section;
+        }
+
+        /**
+         * Close the statistics popup
+         */
+        closePopup() {
+            if (this.overlay) {
+                this.overlay.remove();
+                this.overlay = null;
+            }
+        }
+
+        /**
+         * Disable and cleanup
+         */
+        disable() {
+            this.closePopup();
+            this.removeButton();
+
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+
+            this.isInitialized = false;
+        }
+    }
+
+    const taskStatistics = new TaskStatistics();
+
+    taskStatistics.setupSettingListener();
+
+    /**
+     * Remaining XP Display
+     * Shows remaining XP to next level on skill bars in the left navigation panel
+     */
+
+
+    class RemainingXP {
+        constructor() {
+            this.initialized = false;
+            this.updateInterval = null;
+            this.unregisterObservers = [];
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.progressBarObservers = new Map(); // Track MutationObservers for each progress bar
+        }
+
+        /**
+         * Initialize the remaining XP display
+         */
+        initialize() {
+            if (this.initialized) return;
+
+            // Watch for skill buttons appearing
+            this.watchSkillButtons();
+
+            // Setup observers for any existing progress bars
+            const existingProgressBars = document.querySelectorAll('[class*="currentExperience"]');
+            existingProgressBars.forEach((progressBar) => {
+                this.setupProgressBarObserver(progressBar);
+            });
+
+            this.initialized = true;
+        }
+
+        /**
+         * Watch for skill buttons in the navigation panel and other skill displays
+         */
+        watchSkillButtons() {
+            // Watch for left navigation bar skills (non-combat skills)
+            const unregisterNav = domObserver.onClass(
+                'RemainingXP-NavSkillBar',
+                'NavigationBar_currentExperience',
+                (progressBar) => {
+                    this.setupProgressBarObserver(progressBar);
+                }
+            );
+            this.unregisterObservers.push(unregisterNav);
+
+            // Wait for character data to be loaded before setting up observers
+            const initHandler = () => {
+                // Setup observers for all progress bars once character data is ready
+                // No delay needed - character data is available, update immediately
+                const progressBars = document.querySelectorAll('[class*="currentExperience"]');
+                progressBars.forEach((progressBar) => {
+                    this.setupProgressBarObserver(progressBar);
+                    // Force immediate update since bars are already rendered
+                    this.updateSingleSkillBar(progressBar);
+                });
+            };
+
+            dataManager.on('character_initialized', initHandler);
+
+            // Check if character data already loaded (in case we missed the event)
+            if (dataManager.characterData) {
+                initHandler();
+            }
+
+            this.unregisterObservers.push(() => {
+                dataManager.off('character_initialized', initHandler);
+            });
+        }
+
+        /**
+         * Setup MutationObserver for a progress bar to watch for style changes
+         * @param {HTMLElement} progressBar - The progress bar element
+         */
+        setupProgressBarObserver(progressBar) {
+            // Skip if we're already observing this progress bar
+            if (this.progressBarObservers.has(progressBar)) {
+                return;
+            }
+
+            // Initial update
+            this.addRemainingXP(progressBar);
+
+            // Watch for style attribute changes (width percentage updates)
+            const unwatch = domObserverHelpers_js.createMutationWatcher(
+                progressBar,
+                () => {
+                    this.updateSingleSkillBar(progressBar);
+                },
+                {
+                    attributes: true,
+                    attributeFilter: ['style'],
+                }
+            );
+
+            // Store the observer so we can clean it up later
+            this.progressBarObservers.set(progressBar, unwatch);
+        }
+
+        /**
+         * Update a single skill bar with remaining XP
+         * @param {HTMLElement} progressBar - The progress bar element
+         */
+        updateSingleSkillBar(progressBar) {
+            // Remove existing XP display for this progress bar
+            const progressContainer = progressBar.parentNode;
+            if (progressContainer) {
+                const existingDisplay = progressContainer.querySelector('.mwi-remaining-xp');
+                if (existingDisplay) {
+                    existingDisplay.remove();
+                }
+            }
+
+            // Add updated XP display
+            this.addRemainingXP(progressBar);
+        }
+
+        /**
+         * Add remaining XP display to a skill bar
+         * @param {HTMLElement} progressBar - The progress bar element
+         */
+        addRemainingXP(progressBar) {
+            try {
+                // Try to find skill name - handle both navigation bar and combat skill displays
+                let skillName = null;
+
+                // Check if we're in a sub-skills container (combat skills)
+                const subSkillsContainer = progressBar.closest('[class*="NavigationBar_subSkills"]');
+
+                if (subSkillsContainer) {
+                    // We're in combat sub-skills - look for label in immediate parent structure
+                    // The label should be in a sibling or nearby element, not in the parent navigationLink
+                    const navContainer = progressBar.closest('[class*="NavigationBar_nav"]');
+                    if (navContainer) {
+                        const skillNameElement = navContainer.querySelector('[class*="NavigationBar_label"]');
+                        if (skillNameElement) {
+                            skillName = skillNameElement.textContent.trim();
+                        }
+                    }
+                } else {
+                    // Regular skill (not a sub-skill) - use standard navigation link approach
+                    const navLink = progressBar.closest('[class*="NavigationBar_navigationLink"]');
+                    if (navLink) {
+                        const skillNameElement = navLink.querySelector('[class*="NavigationBar_label"]');
+                        if (skillNameElement) {
+                            skillName = skillNameElement.textContent.trim();
+                        }
+                    }
+                }
+
+                if (!skillName) return;
+
+                // Calculate remaining XP for this skill using progress bar width (like XP percentage does)
+                const remainingXP = this.calculateRemainingXPFromProgressBar(progressBar, skillName);
+                if (remainingXP === null) return;
+
+                // Find the progress bar container (parent of the progress bar)
+                const progressContainer = progressBar.parentNode;
+                if (!progressContainer) return;
+
+                // Check if we already added XP display here (prevent duplicates)
+                if (progressContainer.querySelector('.mwi-remaining-xp')) return;
+
+                // Create the remaining XP display
+                const xpDisplay = document.createElement('span');
+                xpDisplay.className = 'mwi-remaining-xp';
+                xpDisplay.textContent = `${formatters_js.formatLargeNumber(remainingXP)} XP left`;
+
+                // Build style with optional text shadow
+                const useBlackBorder = config.getSetting('skillRemainingXP_blackBorder', true);
+                const textShadow = useBlackBorder
+                    ? 'text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 3px #000;'
+                    : '';
+
+                xpDisplay.style.cssText = `
+                font-size: 11px;
+                color: ${config.COLOR_REMAINING_XP};
+                display: block;
+                margin-top: -8px;
+                text-align: center;
+                width: 100%;
+                font-weight: 600;
+                pointer-events: none;
+                ${textShadow}
+            `;
+
+                // Insert after the progress bar
+                progressContainer.insertBefore(xpDisplay, progressBar.nextSibling);
+            } catch {
+                // Silent fail - don't spam console with errors
+            }
+        }
+
+        /**
+         * Calculate remaining XP from progress bar width (real-time, like XP percentage)
+         * @param {HTMLElement} progressBar - The progress bar element
+         * @param {string} skillName - The skill name (e.g., "Milking", "Combat")
+         * @returns {number|null} Remaining XP or null if unavailable
+         */
+        calculateRemainingXPFromProgressBar(progressBar, skillName) {
+            // Convert skill name to HRID
+            const skillHrid = `/skills/${skillName.toLowerCase()}`;
+
+            // Get character skills data for level info
+            const characterData = dataManager.characterData;
+            if (!characterData || !characterData.characterSkills) {
+                return null;
+            }
+
+            // Find the skill to get current level
+            const skill = characterData.characterSkills.find((s) => s.skillHrid === skillHrid);
+            if (!skill) {
+                return null;
+            }
+
+            // Get level experience table
+            const gameData = dataManager.getInitClientData();
+            if (!gameData || !gameData.levelExperienceTable) return null;
+
+            const currentLevel = skill.level;
+            const nextLevel = currentLevel + 1;
+
+            // Get XP required for current and next level
+            const expForCurrentLevel = gameData.levelExperienceTable[currentLevel] || 0;
+            const expForNextLevel = gameData.levelExperienceTable[nextLevel];
+            if (expForNextLevel === undefined) return null; // Max level
+
+            // Extract percentage from progress bar width (updated by game in real-time)
+            const widthStyle = progressBar.style.width;
+            if (!widthStyle) return null;
+
+            const percentage = parseFloat(widthStyle.replace('%', ''));
+            if (isNaN(percentage)) return null;
+
+            // Calculate XP needed for this level
+            const xpNeededForLevel = expForNextLevel - expForCurrentLevel;
+
+            // Calculate current XP within this level based on progress bar
+            const currentXPInLevel = (percentage / 100) * xpNeededForLevel;
+
+            // Calculate remaining XP
+            const remainingXP = xpNeededForLevel - currentXPInLevel;
+
+            return Math.max(0, Math.ceil(remainingXP));
+        }
+
+        /**
+         * Disable the remaining XP display
+         */
+        disable() {
+            if (this.updateInterval) {
+                clearInterval(this.updateInterval);
+                this.updateInterval = null;
+            }
+
+            this.timerRegistry.clearAll();
+
+            // Disconnect all progress bar observers
+            this.progressBarObservers.forEach((unwatch) => {
+                unwatch();
+            });
+            this.progressBarObservers.clear();
+
+            // Unregister observers
+            this.unregisterObservers.forEach((unregister) => unregister());
+            this.unregisterObservers = [];
+
+            // Remove all XP displays
+            document.querySelectorAll('.mwi-remaining-xp').forEach((el) => el.remove());
+
+            this.initialized = false;
+        }
+    }
+
+    const remainingXP = new RemainingXP();
+
+    /**
+     * XP/hr Tracker
+     * Shows live XP/hr rates on skill bars and time-to-level-up in skill tooltips
+     */
+
+
+    const STORE_NAME$1 = 'xpHistory';
+    const WINDOW_10M$1 = 10 * 60 * 1000;
+    const WINDOW_1H$1 = 60 * 60 * 1000;
+    const WINDOW_1W$1 = 7 * 24 * 60 * 60 * 1000;
+
+    /**
+     * Skill definitions matching game skill HRIDs
+     */
+    const SKILLS = [
+        { id: 'total_level', hrid: '/skills/total_level', name: 'Total Level' },
+        { id: 'milking', hrid: '/skills/milking', name: 'Milking' },
+        { id: 'foraging', hrid: '/skills/foraging', name: 'Foraging' },
+        { id: 'woodcutting', hrid: '/skills/woodcutting', name: 'Woodcutting' },
+        { id: 'cheesesmithing', hrid: '/skills/cheesesmithing', name: 'Cheesesmithing' },
+        { id: 'crafting', hrid: '/skills/crafting', name: 'Crafting' },
+        { id: 'tailoring', hrid: '/skills/tailoring', name: 'Tailoring' },
+        { id: 'cooking', hrid: '/skills/cooking', name: 'Cooking' },
+        { id: 'brewing', hrid: '/skills/brewing', name: 'Brewing' },
+        { id: 'alchemy', hrid: '/skills/alchemy', name: 'Alchemy' },
+        { id: 'enhancing', hrid: '/skills/enhancing', name: 'Enhancing' },
+        { id: 'stamina', hrid: '/skills/stamina', name: 'Stamina' },
+        { id: 'intelligence', hrid: '/skills/intelligence', name: 'Intelligence' },
+        { id: 'attack', hrid: '/skills/attack', name: 'Attack' },
+        { id: 'melee', hrid: '/skills/melee', name: 'Melee' },
+        { id: 'defense', hrid: '/skills/defense', name: 'Defense' },
+        { id: 'ranged', hrid: '/skills/ranged', name: 'Ranged' },
+        { id: 'magic', hrid: '/skills/magic', name: 'Magic' },
+    ];
+
+    const SKILL_NAME_TO_ID = {};
+    SKILLS.forEach((s) => (SKILL_NAME_TO_ID[s.name.toLowerCase()] = s.id));
+
+    // Also map hrid → skill for reverse lookups
+    const SKILL_HRID_TO_ID = {};
+    SKILLS.forEach((s) => (SKILL_HRID_TO_ID[s.hrid] = s.id));
+
+    /**
+     * Append an XP data point to a skill's history array, compacting as needed.
+     * Ported from XP-Per-Hr.txt pushXP() with identical compaction rules.
+     * @param {Array} arr - Existing history array (mutated in place)
+     * @param {{t: number, xp: number}} d - New data point
+     */
+    function pushXP$1(arr, d) {
+        if (arr.length === 0 || d.xp >= arr[arr.length - 1].xp) {
+            arr.push(d);
+        } else {
+            // XP should never decrease within the same character session
+            return;
+        }
+
+        if (arr.length <= 2) return;
+
+        // Rule 1: within the last 10 minutes, keep only first + last
+        let recentLength = 0;
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (d.t - arr[i].t <= WINDOW_10M$1) {
+                recentLength++;
+            } else {
+                break;
+            }
+        }
+        if (recentLength > 2) {
+            arr.splice(arr.length - recentLength + 1, recentLength - 2);
+        }
+
+        // Rule 2: collapse consecutive same-XP entries that are within 1 hour apart
+        let sameLength = 0;
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (arr[i].xp === d.xp && d.t - arr[i].t <= WINDOW_1H$1) {
+                sameLength++;
+            } else {
+                break;
+            }
+        }
+        if (sameLength > 1) {
+            arr.splice(arr.length - sameLength, sameLength - 1);
+        }
+
+        // Rule 3: drop entries older than 1 week
+        let oldLength = 0;
+        for (let i = 0; i < arr.length; i++) {
+            if (d.t - arr[i].t > WINDOW_1W$1) {
+                oldLength++;
+            } else {
+                break;
+            }
+        }
+        if (oldLength > 0) {
+            arr.splice(0, oldLength);
+        }
+    }
+
+    /**
+     * Filter history to only entries within the given interval from now.
+     * @param {Array} arr
+     * @param {number} interval - ms
+     * @returns {Array}
+     */
+    function inLastInterval$1(arr, interval) {
+        const now = Date.now();
+        const result = [];
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (now - arr[i].t <= interval) {
+                result.unshift(arr[i]);
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Calculate XP/hr between two data points.
+     * @param {{t: number, xp: number}} prev
+     * @param {{t: number, xp: number}} cur
+     * @returns {number} XP per hour
+     */
+    function calcXPH$1(prev, cur) {
+        const xpDelta = cur.xp - prev.xp;
+        const tDeltaMs = cur.t - prev.t;
+        return (xpDelta / tDeltaMs) * 3600000;
+    }
+
+    /**
+     * Compute lastXPH (10-min window) and lastHourXPH (1-hr window) for a skill.
+     * @param {Array} arr - History array for one skill
+     * @returns {{lastXPH: number, lastHourXPH: number}}
+     */
+    function calcStats$1(arr) {
+        if (arr.length < 2) return { lastXPH: 0, lastHourXPH: 0 };
+
+        const last10m = inLastInterval$1(arr, WINDOW_10M$1);
+        const lastXPH = last10m.length >= 2 ? calcXPH$1(last10m[0], last10m[last10m.length - 1]) : 0;
+
+        const last1h = inLastInterval$1(arr, WINDOW_1H$1);
+        const lastHourXPH = last1h.length >= 2 ? calcXPH$1(last1h[0], last1h[last1h.length - 1]) : 0;
+
+        return { lastXPH, lastHourXPH };
+    }
+
+    /**
+     * Format a time-to-level duration in ms to a human-readable string.
+     * @param {number} ms
+     * @returns {string}
+     */
+    function formatTimeLeft$1(ms) {
+        const m1 = 60 * 1000;
+        const h1 = 60 * 60 * 1000;
+        const d1 = 24 * 60 * 60 * 1000;
+        const w1 = 7 * 24 * 60 * 60 * 1000;
+
+        const w = Math.floor(ms / w1);
+        const d = Math.floor((ms % w1) / d1);
+        const h = Math.floor((ms % d1) / h1);
+        const m = Math.ceil((ms % h1) / m1);
+
+        const s = (n) => (n === 1 ? '' : 's');
+        const parts = [];
+
+        if (w >= 1) parts.push(`${w} week${s(w)}`);
+        if (d >= 1) parts.push(`${d} day${s(d)}`);
+        if (ms < w1 && h >= 1) parts.push(`${h} hour${s(h)}`);
+        if (ms < 6 * h1 && m >= 1) parts.push(`${m} minute${s(m)}`);
+
+        return parts.join(' ') || '< 1 minute';
+    }
+
+    class XPTracker {
+        constructor() {
+            this.initialized = false;
+            this.characterId = null;
+            this.xpHistory = {}; // skillId → [{t, xp}]
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.unregisterObservers = [];
+            this.tooltipObserver = null;
+        }
+
+        async initialize() {
+            if (this.initialized) return;
+            if (!config.getSetting('xpTracker', true)) return;
+
+            const characterInitHandler = async (data) => {
+                await this._onCharacterInit(data);
+            };
+
+            const actionCompletedHandler = (data) => {
+                this._onActionCompleted(data);
+            };
+
+            dataManager.on('character_initialized', characterInitHandler);
+            dataManager.on('action_completed', actionCompletedHandler);
+
+            this.unregisterObservers.push(() => {
+                dataManager.off('character_initialized', characterInitHandler);
+                dataManager.off('action_completed', actionCompletedHandler);
+            });
+
+            // If character data is already loaded, initialize immediately
+            if (dataManager.characterData) {
+                await this._onCharacterInit(dataManager.characterData);
+            }
+
+            // Watch for skill tooltip appearing
+            this._watchSkillTooltip();
+
+            this.initialized = true;
+        }
+
+        /**
+         * Handle init_character_data — record starting XP snapshot.
+         */
+        async _onCharacterInit(data) {
+            const charId = data?.character?.id;
+            if (!charId) return;
+
+            this.characterId = charId;
+
+            // Load persisted history for this character
+            const stored = await storage.get(`xpHistory_${charId}`, STORE_NAME$1, {});
+            this.xpHistory = stored;
+
+            const t = data.currentTimestamp ? +new Date(data.currentTimestamp) : Date.now();
+
+            const characterSkills = data.characterSkills || [];
+            characterSkills.forEach((skillEntry) => {
+                const skillId = SKILL_HRID_TO_ID[skillEntry.skillHrid];
+                if (!skillId) return;
+
+                if (!this.xpHistory[skillId]) {
+                    this.xpHistory[skillId] = [];
+                }
+
+                pushXP$1(this.xpHistory[skillId], { t, xp: skillEntry.experience });
+            });
+
+            await storage.set(`xpHistory_${charId}`, this.xpHistory, STORE_NAME$1);
+
+            this._updateNavBars();
+        }
+
+        /**
+         * Handle action_completed — record updated XP for each changed skill.
+         */
+        _onActionCompleted(data) {
+            if (!this.characterId) return;
+
+            const skills = data.endCharacterSkills || [];
+            if (skills.length === 0) return;
+
+            const t = skills[0].updatedAt ? +new Date(skills[0].updatedAt) : Date.now();
+
+            skills.forEach((skillEntry) => {
+                const skillId = SKILL_HRID_TO_ID[skillEntry.skillHrid];
+                if (!skillId) return;
+
+                if (!this.xpHistory[skillId]) {
+                    this.xpHistory[skillId] = [];
+                }
+
+                pushXP$1(this.xpHistory[skillId], { t, xp: skillEntry.experience });
+            });
+
+            storage.set(`xpHistory_${this.characterId}`, this.xpHistory, STORE_NAME$1);
+
+            this._updateNavBars();
+        }
+
+        /**
+         * Inject or refresh XP/hr spans on all visible nav bar skill entries.
+         */
+        _updateNavBars() {
+            if (!config.getSetting('xpTracker', true)) return;
+
+            const navEls = document.querySelectorAll('[class*="NavigationBar_nav"]');
+            navEls.forEach((navEl) => {
+                // Only process nav entries that have an XP bar
+                if (!navEl.querySelector('[class*="NavigationBar_currentExperience"]')) return;
+
+                const labelEl = navEl.querySelector('[class*="NavigationBar_label"]');
+                if (!labelEl) return;
+
+                const skillName = labelEl.textContent.trim().toLowerCase();
+                const skillId = SKILL_NAME_TO_ID[skillName];
+                if (!skillId) return;
+
+                const history = this.xpHistory[skillId];
+                if (!history) return;
+
+                const stats = calcStats$1(history);
+                const rate = stats.lastXPH;
+
+                // Remove existing rate span (may be inline or standalone)
+                navEl.querySelector('.mwi-xp-rate')?.remove();
+
+                if (rate <= 0) return;
+
+                const rateText = `${formatters_js.formatKMB(rate)} xp/h`;
+                const rateSpan = document.createElement('span');
+                rateSpan.className = 'mwi-xp-rate';
+                rateSpan.textContent = rateText;
+                rateSpan.style.cssText = `
+                font-size: 11px;
+                color: ${config.COLOR_XP_RATE};
+                font-weight: 600;
+                pointer-events: none;
+                white-space: nowrap;
+            `;
+
+                // Always place inline in a flex row — create the container if XP Left feature is off
+                let remainingXPEl = navEl.querySelector('.mwi-remaining-xp');
+                if (!remainingXPEl) {
+                    const progressContainer = navEl.querySelector('[class*="NavigationBar_currentExperience"]')?.parentNode;
+                    if (!progressContainer) return;
+                    remainingXPEl = document.createElement('span');
+                    remainingXPEl.className = 'mwi-remaining-xp';
+                    remainingXPEl.dataset.xpTrackerOwned = '1';
+                    remainingXPEl.style.cssText = `
+                    font-size: 11px;
+                    display: block;
+                    margin-top: -8px;
+                    text-align: center;
+                    width: 100%;
+                    pointer-events: none;
+                `;
+                    progressContainer.insertBefore(
+                        remainingXPEl,
+                        progressContainer.querySelector('[class*="NavigationBar_currentExperience"]')?.nextSibling ?? null
+                    );
+                }
+                remainingXPEl.style.display = 'flex';
+                remainingXPEl.style.justifyContent = 'center';
+                remainingXPEl.style.gap = '6px';
+                remainingXPEl.appendChild(rateSpan);
+            });
+        }
+
+        /**
+         * Watch for skill tooltip popup and inject time-to-level.
+         */
+        _watchSkillTooltip() {
+            const unregister = domObserver.onClass(
+                'XPTracker-SkillTooltip',
+                'NavigationBar_navigationSkillTooltip',
+                (tooltipEl) => {
+                    this._addTimeTillLevelUp(tooltipEl);
+                }
+            );
+            this.unregisterObservers.push(unregister);
+        }
+
+        /**
+         * Inject time-to-level into a skill tooltip element.
+         * @param {HTMLElement} tooltipEl
+         */
+        _addTimeTillLevelUp(tooltipEl) {
+            if (!config.getSetting('xpTracker', true)) return;
+            if (!config.getSetting('xpTracker_timeTillLevel', true)) return;
+
+            // Tooltip structure: div[0]=name, div[1]=level, div[2]=xp progress, div[3]="XP to next level: N"
+            const divs = tooltipEl.querySelectorAll(':scope > div');
+            if (divs.length < 4) return;
+
+            const skillName = divs[0].textContent.trim().toLowerCase();
+            const skillId = SKILL_NAME_TO_ID[skillName];
+            if (!skillId) return;
+
+            const history = this.xpHistory[skillId];
+            if (!history) return;
+
+            const stats = calcStats$1(history);
+            if (stats.lastXPH <= 0) return;
+
+            // Parse "XP to next level: 12,345" — strip all non-digit characters to handle
+            // locale-specific separators (commas, periods, spaces)
+            const xpText = divs[3].textContent;
+            const match = xpText.match(/[\d.,\s]+$/);
+            if (!match) return;
+
+            const xpTillLevel = parseInt(match[0].replace(/[^\d]/g, ''), 10);
+            if (isNaN(xpTillLevel) || xpTillLevel <= 0) return;
+
+            // Remove any previously injected element
+            tooltipEl.querySelector('.mwi-xp-time-left')?.remove();
+
+            const msLeft = (xpTillLevel / stats.lastXPH) * 3600000;
+            const timeStr = formatTimeLeft$1(msLeft);
+
+            const div = document.createElement('div');
+            div.className = 'mwi-xp-time-left';
+            div.style.cssText = `font-size: 12px; color: ${config.COLOR_XP_RATE}; margin-top: 4px;`;
+            div.innerHTML = `<span style="font-weight:700">${timeStr}</span> till next level`;
+
+            divs[3].insertAdjacentElement('afterend', div);
+        }
+
+        disable() {
+            this.timerRegistry.clearAll();
+
+            this.unregisterObservers.forEach((fn) => fn());
+            this.unregisterObservers = [];
+
+            document.querySelectorAll('.mwi-xp-rate').forEach((el) => el.remove());
+            document.querySelectorAll('.mwi-xp-time-left').forEach((el) => el.remove());
+            document.querySelectorAll('.mwi-remaining-xp[data-xp-tracker-owned]').forEach((el) => el.remove());
+
+            this.initialized = false;
+        }
+    }
+
+    const xpTracker = new XPTracker();
+
+    var xpTracker$1 = {
+        name: 'XP/hr Tracker',
+        initialize: () => xpTracker.initialize(),
+        cleanup: () => xpTracker.disable(),
+    };
+
+    /**
+     * Loot Log Statistics Module
+     * Adds total value, average time, and daily output statistics to loot logs
+     * Port of Edible Tools loot tracker feature, integrated into Toolasha architecture
+     */
+
+
+    class LootLogStats {
+        constructor() {
+            this.unregisterHandlers = [];
+            this.initialized = false;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.processedLogs = new WeakSet();
+            this.currentLootLogData = null;
+            this.itemsSpriteUrl = null;
+        }
+
+        /**
+         * Initialize loot log statistics feature
+         */
+        async initialize() {
+            if (this.initialized) return;
+
+            const enabled = config.getSetting('lootLogStats');
+            if (!enabled) return;
+
+            // Listen for loot_log_updated messages from WebSocket
+            const wsHandler = (data) => this.handleLootLogUpdate(data);
+            webSocketHook.on('loot_log_updated', wsHandler);
+            this.unregisterHandlers.push(() => {
+                webSocketHook.off('loot_log_updated', wsHandler);
+            });
+
+            // Watch for loot log elements in DOM
+            const unregisterObserver = domObserver.onClass('LootLogStats', 'LootLogPanel_actionLoot__32gl_', (element) =>
+                this.processLootLogElement(element)
+            );
+            this.unregisterHandlers.push(unregisterObserver);
+
+            this.initialized = true;
+        }
+
+        /**
+         * Handle loot_log_updated WebSocket message
+         * @param {Object} data - WebSocket message data
+         */
+        handleLootLogUpdate(data) {
+            if (!data || !Array.isArray(data.lootLog)) return;
+
+            // Store loot log data for matching with DOM elements
+            this.currentLootLogData = data.lootLog;
+
+            // Process existing loot log elements after short delay
+            const timeout = setTimeout(() => {
+                const lootLogElements = document.querySelectorAll('.LootLogPanel_actionLoot__32gl_');
+                lootLogElements.forEach((element) => this.processLootLogElement(element));
+            }, 200);
+
+            this.timerRegistry.registerTimeout(timeout);
+        }
+
+        /**
+         * Process a single loot log DOM element
+         * @param {HTMLElement} lootElem - Loot log element
+         */
+        processLootLogElement(lootElem) {
+            // Skip if already processed
+            if (this.processedLogs.has(lootElem)) return;
+
+            // Mark as processed
+            this.processedLogs.add(lootElem);
+
+            // Extract divs
+            const divs = lootElem.querySelectorAll('div');
+            if (divs.length < 3) return;
+
+            const secondDiv = divs[1]; // Timestamps
+            const thirdDiv = divs[2]; // Duration
+
+            // Extract log data
+            const logData = this.extractLogData(lootElem, secondDiv);
+            if (!logData) return;
+
+            // Skip enhancement actions
+            if (logData.actionHrid === '/actions/enhancing/enhance') return;
+
+            // Calculate and inject total value
+            this.injectTotalValue(secondDiv, logData);
+
+            // Calculate and inject average time and daily output
+            this.injectTimeAndDailyOutput(thirdDiv, logData);
+        }
+
+        /**
+         * Extract log data from DOM element
+         * @param {HTMLElement} lootElem - Loot log element
+         * @param {HTMLElement} secondDiv - Second div containing timestamps
+         * @returns {Object|null} Log data object or null if extraction fails
+         */
+        extractLogData(lootElem, secondDiv) {
+            if (!this.currentLootLogData || !Array.isArray(this.currentLootLogData)) {
+                return null;
+            }
+
+            // Extract start time from DOM
+            const textContent = secondDiv.textContent;
+            let utcISOString = '';
+
+            // Try multiple date formats
+            const matchCN = textContent.match(/(\d{4}\/\d{1,2}\/\d{1,2} \d{1,2}:\d{2}:\d{2})/);
+            const matchEN = textContent.match(/(\d{1,2}\/\d{1,2}\/\d{4}, \d{1,2}:\d{2}:\d{2} (AM|PM))/i);
+            const matchDE = textContent.match(/(\d{1,2}\.\d{1,2}\.\d{4}, \d{1,2}:\d{2}:\d{2})/);
+
+            if (matchCN) {
+                const localTimeStr = matchCN[1].trim();
+                const [y, m, d, h, min, s] = localTimeStr.match(/\d+/g).map(Number);
+                const localDate = new Date(y, m - 1, d, h, min, s);
+                utcISOString = localDate.toISOString().slice(0, 19);
+            } else if (matchEN) {
+                const localTimeStr = matchEN[1].trim();
+                const localDate = new Date(localTimeStr);
+                if (!isNaN(localDate)) {
+                    utcISOString = localDate.toISOString().slice(0, 19);
+                } else {
+                    return null;
+                }
+            } else if (matchDE) {
+                const localTimeStr = matchDE[1].trim();
+                const [datePart, timePart] = localTimeStr.split(', ');
+                const [day, month, year] = datePart.split('.').map(Number);
+                const [hours, minutes, seconds] = timePart.split(':').map(Number);
+                const localDate = new Date(year, month - 1, day, hours, minutes, seconds);
+                utcISOString = localDate.toISOString().slice(0, 19);
+            } else {
+                return null;
+            }
+
+            // Find matching log data
+            const getLogStartTimeSec = (logObj) => {
+                return logObj && logObj.startTime ? logObj.startTime.slice(0, 19) : '';
+            };
+
+            let log = null;
+            for (const logObj of this.currentLootLogData) {
+                if (getLogStartTimeSec(logObj) === utcISOString) {
+                    log = logObj;
+                    break;
+                }
+            }
+
+            return log;
+        }
+
+        /**
+         * Calculate total value of drops
+         * @param {Object} drops - Drops object { [itemHrid]: count, ... }
+         * @returns {Object} { askTotal, bidTotal }
+         */
+        calculateTotalValue(drops) {
+            let askTotal = 0;
+            let bidTotal = 0;
+
+            if (!drops) return { askTotal, bidTotal };
+
+            for (const [hrid, count] of Object.entries(drops)) {
+                // Strip enhancement level from HRID
+                const baseHrid = hrid.replace(/::\d+$/, '');
+
+                // Coins are base currency — not in marketplace, face value is 1
+                if (baseHrid === '/items/coin') {
+                    askTotal += count;
+                    bidTotal += count;
+                    continue;
+                }
+
+                // Check for openable containers (caches, chests) — use expected value
+                const itemDetails = dataManager.getItemDetails(baseHrid);
+                if (itemDetails?.isOpenable && expectedValueCalculator.isInitialized) {
+                    const evData = expectedValueCalculator.calculateExpectedValue(baseHrid);
+                    if (evData && evData.expectedValue > 0) {
+                        askTotal += evData.expectedValue * count;
+                        bidTotal += evData.expectedValue * count;
+                        continue;
+                    }
+                }
+
+                // Get market prices
+                const prices = marketData_js.getItemPrices(baseHrid, 0);
+                if (!prices) continue;
+
+                const ask = prices.ask || 0;
+                const bid = prices.bid || 0;
+
+                askTotal += ask * count;
+                bidTotal += bid * count;
+            }
+
+            return { askTotal, bidTotal };
+        }
+
+        /**
+         * Calculate average time per action
+         * @param {string} startTime - ISO start time
+         * @param {string} endTime - ISO end time
+         * @param {number} actionCount - Number of actions
+         * @returns {number} Average time in seconds, or 0 if invalid
+         */
+        calculateAverageTime(startTime, endTime, actionCount) {
+            if (!startTime || !endTime || !actionCount || actionCount === 0) {
+                return 0;
+            }
+
+            const duration = (new Date(endTime) - new Date(startTime)) / 1000;
+            if (duration <= 0) return 0;
+
+            return duration / actionCount;
+        }
+
+        /**
+         * Calculate daily output value
+         * @param {number} totalValue - Total value
+         * @param {number} durationSeconds - Duration in seconds
+         * @returns {number} Daily output value, or 0 if invalid
+         */
+        calculateDailyOutput(totalValue, durationSeconds) {
+            if (!totalValue || !durationSeconds || durationSeconds === 0) {
+                return 0;
+            }
+
+            return (totalValue * 86400) / durationSeconds;
+        }
+
+        /**
+         * Format duration for display
+         * @param {number} seconds - Duration in seconds
+         * @returns {string} Formatted duration string
+         */
+        formatDuration(seconds) {
+            if (seconds === 0 || !seconds) return '—';
+            if (seconds < 60) return `${seconds.toFixed(2)}s`;
+
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.round(seconds % 60);
+
+            let str = '';
+            if (h > 0) str += `${h}h`;
+            if (m > 0 || h > 0) str += `${m}m`;
+            str += `${s}s`;
+
+            return str;
+        }
+
+        /**
+         * Inject expandable total value into second div
+         * @param {HTMLElement} secondDiv - Second div element
+         * @param {Object} logData - Log data object
+         */
+        injectTotalValue(secondDiv, logData) {
+            // Remove existing value element
+            const oldValue = secondDiv.querySelector('.mwi-loot-log-value');
+            if (oldValue) oldValue.remove();
+
+            if (!logData || !logData.drops) return;
+
+            // Calculate total value
+            const { askTotal, bidTotal } = this.calculateTotalValue(logData.drops);
+
+            // Create wrapper div
+            const wrapper = document.createElement('div');
+            wrapper.className = 'mwi-loot-log-value';
+            wrapper.style.cssText = 'float: right; margin-left: 8px;';
+
+            // Create header (clickable total value line)
+            const header = document.createElement('span');
+            header.style.cssText = `color: ${config.COLOR_GOLD}; font-weight: bold;`;
+
+            if (askTotal === 0 && bidTotal === 0) {
+                header.textContent = 'Total Value: —';
+                wrapper.appendChild(header);
+                secondDiv.appendChild(wrapper);
+                return;
+            }
+
+            header.textContent = `▶ Total Value: ${formatters_js.formatKMB(askTotal)}/${formatters_js.formatKMB(bidTotal)}`;
+            header.style.cursor = 'pointer';
+            wrapper.appendChild(header);
+
+            // Create details container (hidden by default)
+            const details = this.buildItemBreakdown(logData.drops);
+            details.style.display = 'none';
+            wrapper.appendChild(details);
+
+            // Toggle on click
+            header.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isOpen = details.style.display !== 'none';
+                details.style.display = isOpen ? 'none' : 'block';
+                const text = header.textContent;
+                header.textContent = isOpen ? text.replace('▼', '▶') : text.replace('▶', '▼');
+            });
+
+            secondDiv.appendChild(wrapper);
+        }
+
+        /**
+         * Build item breakdown table for the expandable details
+         * @param {Object} drops - Drops object { [itemHrid]: count, ... }
+         * @returns {HTMLElement} Details container element
+         */
+        buildItemBreakdown(drops) {
+            const container = document.createElement('div');
+            container.style.cssText = `
+            clear: both;
+            margin-top: 4px;
+            padding: 4px 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            font-weight: normal;
+            font-size: 0.9em;
+        `;
+
+            // Build item rows with calculated values
+            const items = [];
+            for (const [hrid, count] of Object.entries(drops)) {
+                const baseHrid = hrid.replace(/::\d+$/, '');
+
+                let name;
+                let askPerItem = 0;
+                let bidPerItem = 0;
+
+                if (baseHrid === '/items/coin') {
+                    name = 'Coins';
+                    askPerItem = 1;
+                    bidPerItem = 1;
+                } else {
+                    const itemDetails = dataManager.getItemDetails(baseHrid);
+                    name = itemDetails?.name || baseHrid.split('/').pop().replace(/_/g, ' ');
+
+                    // Check for openable containers — use expected value
+                    if (itemDetails?.isOpenable && expectedValueCalculator.isInitialized) {
+                        const evData = expectedValueCalculator.calculateExpectedValue(baseHrid);
+                        if (evData && evData.expectedValue > 0) {
+                            askPerItem = evData.expectedValue;
+                            bidPerItem = evData.expectedValue;
+                        }
+                    }
+
+                    // Fall back to market prices
+                    if (askPerItem === 0 && bidPerItem === 0) {
+                        const prices = marketData_js.getItemPrices(baseHrid, 0);
+                        if (prices) {
+                            askPerItem = prices.ask || 0;
+                            bidPerItem = prices.bid || 0;
+                        }
+                    }
+                }
+
+                items.push({
+                    hrid: baseHrid,
+                    name,
+                    count,
+                    askPerItem,
+                    bidPerItem,
+                    askTotal: askPerItem * count,
+                    bidTotal: bidPerItem * count,
+                });
+            }
+
+            // Sort by ask total descending
+            items.sort((a, b) => b.askTotal - a.askTotal);
+
+            // Build rows
+            for (const item of items) {
+                const row = document.createElement('div');
+                row.style.cssText = `
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 2px 0;
+                white-space: nowrap;
+            `;
+
+                // Item icon
+                const icon = this.createItemIcon(item.hrid, 16);
+                if (icon) {
+                    row.appendChild(icon);
+                }
+
+                // Item name
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = item.name;
+                nameSpan.style.cssText = `
+                color: #fff;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                flex-shrink: 1;
+            `;
+                row.appendChild(nameSpan);
+
+                // Quantity
+                const qtySpan = document.createElement('span');
+                qtySpan.textContent = `×${formatters_js.numberFormatter(item.count)}`;
+                qtySpan.style.cssText = `color: #aaa; flex-shrink: 0;`;
+                row.appendChild(qtySpan);
+
+                // Spacer
+                const spacer = document.createElement('span');
+                spacer.style.cssText = 'flex: 1;';
+                row.appendChild(spacer);
+
+                // Stack total ask/bid
+                const totalSpan = document.createElement('span');
+                totalSpan.style.cssText = `color: ${config.COLOR_GOLD}; flex-shrink: 0; text-align: right;`;
+
+                if (item.askTotal > 0 || item.bidTotal > 0) {
+                    totalSpan.textContent = `${formatters_js.formatKMB(item.askTotal)}/${formatters_js.formatKMB(item.bidTotal)}`;
+                } else {
+                    totalSpan.textContent = '—';
+                }
+                row.appendChild(totalSpan);
+
+                container.appendChild(row);
+            }
+
+            return container;
+        }
+
+        /**
+         * Create an SVG item icon element
+         * @param {string} itemHrid - Item HRID
+         * @param {number} size - Icon size in pixels
+         * @returns {SVGElement|null} SVG element or null if sprite URL unavailable
+         */
+        createItemIcon(itemHrid, size) {
+            const spriteUrl = this.getItemsSpriteUrl();
+            if (!spriteUrl) return null;
+
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', String(size));
+            svg.setAttribute('height', String(size));
+            svg.style.flexShrink = '0';
+
+            const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+            const iconName = itemHrid.split('/').pop();
+            use.setAttribute('href', `${spriteUrl}#${iconName}`);
+            svg.appendChild(use);
+
+            return svg;
+        }
+
+        /**
+         * Get the items sprite URL (cached after first lookup)
+         * @returns {string|null} Sprite URL or null
+         */
+        getItemsSpriteUrl() {
+            if (!this.itemsSpriteUrl) {
+                const el = document.querySelector('use[href*="items_sprite"]');
+                if (el) {
+                    const href = el.getAttribute('href');
+                    this.itemsSpriteUrl = href ? href.split('#')[0] : null;
+                }
+            }
+            return this.itemsSpriteUrl;
+        }
+
+        /**
+         * Inject average time and daily output into third div
+         * @param {HTMLElement} thirdDiv - Third div element
+         * @param {Object} logData - Log data object
+         */
+        injectTimeAndDailyOutput(thirdDiv, logData) {
+            // Remove existing spans
+            const oldAvgTime = thirdDiv.querySelector('.mwi-loot-log-avgtime');
+            if (oldAvgTime) oldAvgTime.remove();
+            const oldDayValue = thirdDiv.querySelector('.mwi-loot-log-day-value');
+            if (oldDayValue) oldDayValue.remove();
+
+            if (!logData) return;
+
+            // Calculate duration
+            let duration = 0;
+            if (logData.startTime && logData.endTime) {
+                duration = (new Date(logData.endTime) - new Date(logData.startTime)) / 1000;
+            }
+
+            // Calculate average time
+            const avgTime = this.calculateAverageTime(logData.startTime, logData.endTime, logData.actionCount);
+
+            // Create average time span
+            const avgTimeSpan = document.createElement('span');
+            avgTimeSpan.className = 'mwi-loot-log-avgtime';
+            avgTimeSpan.textContent = `⏱${this.formatDuration(avgTime)}`;
+            avgTimeSpan.style.marginRight = '16px';
+            avgTimeSpan.style.marginLeft = '2ch';
+            avgTimeSpan.style.color = config.COLOR_INFO;
+            avgTimeSpan.style.fontWeight = 'bold';
+            thirdDiv.appendChild(avgTimeSpan);
+
+            // Calculate total value for daily output
+            const { askTotal, bidTotal } = this.calculateTotalValue(logData.drops);
+            const dayValueAsk = this.calculateDailyOutput(askTotal, duration);
+            const dayValueBid = this.calculateDailyOutput(bidTotal, duration);
+
+            // Create daily output span
+            const dayValueSpan = document.createElement('span');
+            dayValueSpan.className = 'mwi-loot-log-day-value';
+
+            if (dayValueAsk === 0 && dayValueBid === 0) {
+                dayValueSpan.textContent = 'Daily Output: —';
+            } else {
+                dayValueSpan.textContent = `Daily Output: ${formatters_js.formatKMB(dayValueAsk)}/${formatters_js.formatKMB(dayValueBid)}`;
+            }
+
+            dayValueSpan.style.float = 'right';
+            dayValueSpan.style.color = config.COLOR_GOLD;
+            dayValueSpan.style.fontWeight = 'bold';
+            dayValueSpan.style.marginLeft = '8px';
+            thirdDiv.appendChild(dayValueSpan);
+        }
+
+        /**
+         * Cleanup when disabling feature
+         */
+        cleanup() {
+            // Remove all injected spans
+            const valueSpans = document.querySelectorAll('.mwi-loot-log-value');
+            valueSpans.forEach((span) => span.remove());
+
+            const avgTimeSpans = document.querySelectorAll('.mwi-loot-log-avgtime');
+            avgTimeSpans.forEach((span) => span.remove());
+
+            const dayValueSpans = document.querySelectorAll('.mwi-loot-log-day-value');
+            dayValueSpans.forEach((span) => span.remove());
+
+            // Unregister all handlers
+            this.unregisterHandlers.forEach((fn) => fn());
+            this.unregisterHandlers = [];
+
+            // Clear timers
+            this.timerRegistry.clearAll();
+
+            // Reset state
+            this.processedLogs = new WeakSet();
+            this.currentLootLogData = null;
+            this.itemsSpriteUrl = null;
+            this.initialized = false;
+        }
+    }
+
+    // Export as feature module
+    var lootLogStats = {
+        name: 'Loot Log Statistics',
+        initialize: async () => {
+            const lootLogStats = new LootLogStats();
+            await lootLogStats.initialize();
+            return lootLogStats;
+        },
+        cleanup: (instance) => {
+            if (instance) {
+                instance.cleanup();
+            }
+        },
+    };
+
+    /**
+     * House Upgrade Cost Calculator
+     * Calculates material and coin costs for house room upgrades
+     */
+
+
+    class HouseCostCalculator {
+        constructor() {
+            this.isInitialized = false;
+        }
+
+        /**
+         * Initialize the calculator
+         */
+        async initialize() {
+            if (this.isInitialized) return;
+
+            // Ensure market data is loaded (check in-memory first to avoid storage reads)
+            if (!marketAPI.isLoaded()) {
+                await marketAPI.fetch();
+            }
+
+            this.isInitialized = true;
+        }
+
+        /**
+         * Get current level of a house room
+         * @param {string} houseRoomHrid - House room HRID (e.g., "/house_rooms/brewery")
+         * @returns {number} Current level (0-8)
+         */
+        getCurrentRoomLevel(houseRoomHrid) {
+            return dataManager.getHouseRoomLevel(houseRoomHrid);
+        }
+
+        /**
+         * Calculate cost for a single level upgrade
+         * @param {string} houseRoomHrid - House room HRID
+         * @param {number} targetLevel - Target level (1-8)
+         * @returns {Promise<Object>} Cost breakdown
+         */
+        async calculateLevelCost(houseRoomHrid, targetLevel) {
+            const initData = dataManager.getInitClientData();
+            if (!initData || !initData.houseRoomDetailMap) {
+                throw new Error('Game data not loaded');
+            }
+
+            const roomData = initData.houseRoomDetailMap[houseRoomHrid];
+            if (!roomData) {
+                throw new Error(`House room not found: ${houseRoomHrid}`);
+            }
+
+            const upgradeCosts = roomData.upgradeCostsMap[targetLevel];
+            if (!upgradeCosts) {
+                throw new Error(`No upgrade costs for level ${targetLevel}`);
+            }
+
+            // Calculate costs
+            let totalCoins = 0;
+            const materials = [];
+
+            for (const item of upgradeCosts) {
+                if (item.itemHrid === '/items/coin') {
+                    totalCoins = item.count;
+                } else {
+                    const marketPrice = await this.getItemMarketPrice(item.itemHrid);
+                    materials.push({
+                        itemHrid: item.itemHrid,
+                        count: item.count,
+                        marketPrice: marketPrice,
+                        totalValue: marketPrice * item.count,
+                    });
+                }
+            }
+
+            const totalMaterialValue = materials.reduce((sum, m) => sum + m.totalValue, 0);
+
+            return {
+                level: targetLevel,
+                coins: totalCoins,
+                materials: materials,
+                totalValue: totalCoins + totalMaterialValue,
+            };
+        }
+
+        /**
+         * Calculate cumulative cost from current level to target level
+         * @param {string} houseRoomHrid - House room HRID
+         * @param {number} currentLevel - Current level
+         * @param {number} targetLevel - Target level (currentLevel+1 to 8)
+         * @returns {Promise<Object>} Aggregated costs
+         */
+        async calculateCumulativeCost(houseRoomHrid, currentLevel, targetLevel) {
+            if (targetLevel <= currentLevel) {
+                throw new Error('Target level must be greater than current level');
+            }
+
+            if (targetLevel > 8) {
+                throw new Error('Maximum house level is 8');
+            }
+
+            let totalCoins = 0;
+            const materialMap = new Map(); // itemHrid -> {itemHrid, count, marketPrice, totalValue}
+
+            // Aggregate costs across all levels
+            for (let level = currentLevel + 1; level <= targetLevel; level++) {
+                const levelCost = await this.calculateLevelCost(houseRoomHrid, level);
+
+                totalCoins += levelCost.coins;
+
+                // Aggregate materials
+                for (const material of levelCost.materials) {
+                    if (materialMap.has(material.itemHrid)) {
+                        const existing = materialMap.get(material.itemHrid);
+                        existing.count += material.count;
+                        existing.totalValue += material.totalValue;
+                    } else {
+                        materialMap.set(material.itemHrid, { ...material });
+                    }
+                }
+            }
+
+            const materials = Array.from(materialMap.values());
+            const totalMaterialValue = materials.reduce((sum, m) => sum + m.totalValue, 0);
+
+            return {
+                fromLevel: currentLevel,
+                toLevel: targetLevel,
+                coins: totalCoins,
+                materials: materials,
+                totalValue: totalCoins + totalMaterialValue,
+            };
+        }
+
+        /**
+         * Get market price for an item (uses 'ask' price for buying materials)
+         * @param {string} itemHrid - Item HRID
+         * @returns {Promise<number>} Market price
+         */
+        async getItemMarketPrice(itemHrid) {
+            // Use 'ask' mode since house upgrades involve buying materials
+            const price = marketData_js.getItemPrice(itemHrid, { mode: 'ask' });
+
+            if (price === null || price === 0) {
+                // Fallback to vendor price from game data
+                const initData = dataManager.getInitClientData();
+                const itemData = initData?.itemDetailMap?.[itemHrid];
+                return itemData?.sellPrice || 0;
+            }
+
+            return price;
+        }
+
+        /**
+         * Get player's inventory count for an item
+         * @param {string} itemHrid - Item HRID
+         * @returns {number} Item count in inventory
+         */
+        getInventoryCount(itemHrid) {
+            const inventory = dataManager.getInventory();
+            if (!inventory) return 0;
+
+            // Only count items in inventory (not equipped) with no enhancement
+            // Enhanced items and equipped items cannot be used for house construction
+            const item = inventory.find(
+                (i) =>
+                    i.itemHrid === itemHrid &&
+                    i.itemLocationHrid === '/item_locations/inventory' &&
+                    (!i.enhancementLevel || i.enhancementLevel === 0)
+            );
+            return item ? item.count : 0;
+        }
+
+        /**
+         * Get item name from game data
+         * @param {string} itemHrid - Item HRID
+         * @returns {string} Item name
+         */
+        getItemName(itemHrid) {
+            if (itemHrid === '/items/coin') {
+                return 'Gold';
+            }
+
+            const initData = dataManager.getInitClientData();
+            const itemData = initData?.itemDetailMap?.[itemHrid];
+            return itemData?.name || 'Unknown Item';
+        }
+
+        /**
+         * Get house room name from game data
+         * @param {string} houseRoomHrid - House room HRID
+         * @returns {string} Room name
+         */
+        getRoomName(houseRoomHrid) {
+            const initData = dataManager.getInitClientData();
+            const roomData = initData?.houseRoomDetailMap?.[houseRoomHrid];
+            return roomData?.name || 'Unknown Room';
+        }
+    }
+
+    const houseCostCalculator = new HouseCostCalculator();
+
+    /**
+     * Marketplace Buy Modal Autofill Utility
+     * Provides shared functionality for auto-filling quantity in marketplace buy modals
+     * Used by missing materials features (actions, houses, etc.)
+     */
+
+
+    /**
+     * Find the quantity input in the buy modal
+     * For equipment items, there are multiple number inputs (enhancement level + quantity)
+     * We need to find the correct one by checking parent containers for label text
+     * @param {HTMLElement} modal - Modal container element
+     * @returns {HTMLInputElement|null} Quantity input element or null
+     */
+    function findQuantityInput(modal) {
+        // Get all number inputs in the modal
+        const allInputs = Array.from(modal.querySelectorAll('input[type="number"]'));
+
+        if (allInputs.length === 0) {
+            return null;
+        }
+
+        if (allInputs.length === 1) {
+            // Only one input - must be quantity
+            return allInputs[0];
+        }
+
+        // Multiple inputs - identify by checking CLOSEST parent first
+        // Strategy 1: Check each parent level individually, prioritizing closer parents
+        // This prevents matching on the outermost container that has all text
+        for (let level = 0; level < 4; level++) {
+            for (let i = 0; i < allInputs.length; i++) {
+                const input = allInputs[i];
+                let parent = input.parentElement;
+
+                // Navigate to the specific level
+                for (let j = 0; j < level && parent; j++) {
+                    parent = parent.parentElement;
+                }
+
+                if (!parent) continue;
+
+                const text = parent.textContent;
+
+                // At this specific level, check if it contains "Quantity" but NOT "Enhancement Level"
+                if (text.includes('Quantity') && !text.includes('Enhancement Level')) {
+                    return input;
+                }
+            }
+        }
+
+        // Strategy 2: Exclude inputs that have "Enhancement Level" in close parents (level 0-2)
+        for (let i = 0; i < allInputs.length; i++) {
+            const input = allInputs[i];
+            let parent = input.parentElement;
+            let isEnhancementInput = false;
+
+            // Check only the first 3 levels (not the outermost container)
+            for (let j = 0; j < 3 && parent; j++) {
+                const text = parent.textContent;
+
+                if (text.includes('Enhancement Level') && !text.includes('Quantity')) {
+                    isEnhancementInput = true;
+                    break;
+                }
+
+                parent = parent.parentElement;
+            }
+
+            if (!isEnhancementInput) {
+                return input;
+            }
+        }
+
+        // Fallback: Return first input and log warning
+        console.warn('[MarketplaceAutofill] Could not definitively identify quantity input, using first input');
+        return allInputs[0];
+    }
+
+    /**
+     * Handle buy modal appearance and auto-fill quantity if available
+     * @param {HTMLElement} modal - Modal container element
+     * @param {number|null} activeQuantity - Quantity to auto-fill (null if none)
+     */
+    function handleBuyModal(modal, activeQuantity) {
+        // Check if we have an active quantity to fill
+        if (!activeQuantity || activeQuantity <= 0) {
+            return;
+        }
+
+        // Check if this is a "Buy Now" modal
+        const header = modal.querySelector('div[class*="MarketplacePanel_header"]');
+        if (!header) {
+            return;
+        }
+
+        const headerText = header.textContent.trim();
+        if (!headerText.includes('Buy Now') && !headerText.includes('Buy Listing')) {
+            return;
+        }
+
+        // Find the quantity input - need to be specific to avoid enhancement level input
+        const quantityInput = findQuantityInput(modal);
+        if (!quantityInput) {
+            return;
+        }
+
+        // Set the quantity value
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(quantityInput, activeQuantity.toString());
+
+        // Trigger input event to notify React
+        const inputEvent = new Event('input', { bubbles: true });
+        quantityInput.dispatchEvent(inputEvent);
+    }
+
+    /**
+     * Create an autofill manager instance
+     * Manages storing quantity to autofill and observing buy modals
+     * @param {string} observerId - Unique ID for this observer (e.g., 'MissingMats-Actions')
+     * @returns {Object} Autofill manager with methods: setQuantity, clearQuantity, initialize, cleanup
+     */
+    function createAutofillManager(observerId) {
+        let activeQuantity = null;
+        let observerUnregister = null;
+
+        return {
+            /**
+             * Set the quantity to auto-fill in the next buy modal
+             * @param {number} quantity - Quantity to auto-fill
+             */
+            setQuantity(quantity) {
+                activeQuantity = quantity;
+            },
+
+            /**
+             * Clear the stored quantity (cancel autofill)
+             */
+            clearQuantity() {
+                activeQuantity = null;
+            },
+
+            /**
+             * Get the current active quantity
+             * @returns {number|null} Current quantity or null
+             */
+            getQuantity() {
+                return activeQuantity;
+            },
+
+            /**
+             * Initialize buy modal observer
+             * Sets up watching for buy modals to appear and auto-fills them
+             */
+            initialize() {
+                observerUnregister = domObserver.onClass(observerId, 'Modal_modalContainer', (modal) => {
+                    handleBuyModal(modal, activeQuantity);
+                });
+            },
+
+            /**
+             * Cleanup observer
+             * Stops watching for buy modals and clears quantity
+             */
+            cleanup() {
+                if (observerUnregister) {
+                    observerUnregister();
+                    observerUnregister = null;
+                }
+                activeQuantity = null;
+            },
+        };
+    }
+
+    /**
+     * Marketplace Custom Tabs Utility
+     * Provides shared functionality for creating and managing custom marketplace tabs
+     * Used by missing materials features (actions, houses, etc.)
+     */
+
+
+    /**
+     * Create a custom material tab for the marketplace
+     * @param {Object} material - Material data object
+     * @param {string} material.itemHrid - Item HRID
+     * @param {string} material.itemName - Display name for the item
+     * @param {number} material.missing - Amount missing (0 if sufficient)
+     * @param {number} [material.queued=0] - Amount reserved by queue
+     * @param {boolean} material.isTradeable - Whether item can be traded
+     * @param {HTMLElement} referenceTab - Tab element to clone structure from
+     * @param {Function} onClickCallback - Callback when tab is clicked, receives (e, material)
+     * @returns {HTMLElement} Created tab element
+     */
+    function createMaterialTab(material, referenceTab, onClickCallback) {
+        // Clone reference tab structure
+        const tab = referenceTab.cloneNode(true);
+
+        // Mark as custom tab for later identification
+        tab.setAttribute('data-mwi-custom-tab', 'true');
+        tab.setAttribute('data-item-hrid', material.itemHrid);
+        tab.setAttribute('data-missing-quantity', material.missing.toString());
+
+        // Color coding:
+        // - Red: Missing materials (missing > 0)
+        // - Green: Sufficient materials (missing = 0)
+        // - Gray: Not tradeable
+        let statusColor;
+        let statusText;
+
+        if (!material.isTradeable) {
+            statusColor = '#888888'; // Gray - not tradeable
+            statusText = 'Not Tradeable';
+        } else if (material.missing > 0) {
+            statusColor = '#ef4444'; // Red - missing materials
+            // Show queued amount if any materials are reserved by queue
+            const queuedText = material.queued > 0 ? ` (${formatters_js.formatWithSeparator(material.queued)} Q'd)` : '';
+            statusText = `Missing: ${formatters_js.formatWithSeparator(material.missing)}${queuedText}`;
+        } else {
+            statusColor = '#4ade80'; // Green - sufficient materials
+            statusText = 'Sufficient';
+        }
+
+        // Update text content
+        const badgeSpan = tab.querySelector('.TabsComponent_badge__1Du26');
+        if (badgeSpan) {
+            // Title case: capitalize first letter of each word
+            const titleCaseName = material.itemName
+                .split(' ')
+                .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+                .join(' ');
+
+            badgeSpan.innerHTML = `
+            <div style="text-align: center;">
+                <div>${titleCaseName}</div>
+                <div style="font-size: 0.75em; color: ${statusColor};">
+                    ${statusText}
+                </div>
+            </div>
+        `;
+        }
+
+        // Gray out if not tradeable
+        if (!material.isTradeable) {
+            tab.style.opacity = '0.5';
+            tab.style.cursor = 'not-allowed';
+        }
+
+        // Remove selected state
+        tab.classList.remove('Mui-selected');
+        tab.setAttribute('aria-selected', 'false');
+        tab.setAttribute('tabindex', '-1');
+
+        // Add click handler
+        tab.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (!material.isTradeable) {
+                // Not tradeable - do nothing
+                return;
+            }
+
+            // Call the provided callback
+            if (onClickCallback) {
+                onClickCallback(e, material);
+            }
+        });
+
+        return tab;
+    }
+
+    /**
+     * Remove all custom material tabs from the marketplace
+     */
+    function removeMaterialTabs() {
+        const customTabs = document.querySelectorAll('[data-mwi-custom-tab="true"]');
+        customTabs.forEach((tab) => tab.remove());
+    }
+
+    /**
+     * Setup marketplace cleanup observer
+     * Watches for marketplace panel removal and calls cleanup callback
+     * @param {Function} onCleanup - Callback when marketplace closes, receives no args
+     * @param {Array} tabsArray - Array reference to track tabs (will be checked for length)
+     * @returns {Function} Unregister function to stop observing
+     */
+    function setupMarketplaceCleanupObserver(onCleanup, tabsArray) {
+        let debounceTimer = null;
+
+        const cleanupObserver = domObserverHelpers_js.createMutationWatcher(
+            document.body,
+            () => {
+                // Only check if we have custom tabs
+                if (!tabsArray || tabsArray.length === 0) {
+                    return;
+                }
+
+                // Clear existing debounce timer
+                if (debounceTimer) {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = null;
+                }
+
+                // Debounce to avoid false positives from rapid DOM changes
+                debounceTimer = setTimeout(() => {
+                    // Check if we still have custom tabs
+                    if (!tabsArray || tabsArray.length === 0) {
+                        return;
+                    }
+
+                    // Check if our custom tabs still exist in the DOM
+                    const hasCustomTabsInDOM = tabsArray.some((tab) => document.body.contains(tab));
+
+                    // If our tabs were removed from DOM, clean up
+                    if (!hasCustomTabsInDOM) {
+                        if (onCleanup) {
+                            onCleanup();
+                        }
+                        return;
+                    }
+
+                    // Check if marketplace navbar is active
+                    const marketplaceNavActive = Array.from(document.querySelectorAll('.NavigationBar_nav__3uuUl')).some(
+                        (nav) => {
+                            const svg = nav.querySelector('svg[aria-label="navigationBar.marketplace"]');
+                            return svg && nav.classList.contains('NavigationBar_active__2Oj_e');
+                        }
+                    );
+
+                    // Check if tabs container still exists (marketplace panel is open)
+                    const tabsContainer = document.querySelector('.MuiTabs-flexContainer[role="tablist"]');
+                    const hasMarketListingsTab =
+                        tabsContainer &&
+                        Array.from(tabsContainer.children).some((btn) => btn.textContent.includes('Market Listings'));
+
+                    // Only cleanup if BOTH navbar is inactive AND marketplace tabs are gone
+                    // This prevents cleanup during transitions when navbar might briefly be inactive
+                    if (!marketplaceNavActive && !hasMarketListingsTab) {
+                        if (onCleanup) {
+                            onCleanup();
+                        }
+                    }
+                }, 100);
+            },
+            {
+                childList: true,
+                subtree: true,
+            }
+        );
+
+        // Return cleanup function that also clears the debounce timer
+        return () => {
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+                debounceTimer = null;
+            }
+            cleanupObserver();
+        };
+    }
+
+    /**
+     * Get game object via React fiber
+     * @returns {Object|null} Game component instance
+     */
+    function getGameObject() {
+        const rootEl = document.getElementById('root');
+        const rootFiber = rootEl?._reactRootContainer?.current || rootEl?._reactRootContainer?._internalRoot?.current;
+        if (!rootFiber) return null;
+
+        function find(fiber) {
+            if (!fiber) return null;
+            if (fiber.stateNode?.handleGoToMarketplace) return fiber.stateNode;
+            return find(fiber.child) || find(fiber.sibling);
+        }
+
+        return find(rootFiber);
+    }
+
+    /**
+     * Navigate to marketplace for a specific item
+     * @param {string} itemHrid - Item HRID to navigate to
+     * @param {number} enhancementLevel - Enhancement level (default 0)
+     */
+    function navigateToMarketplace(itemHrid, enhancementLevel = 0) {
+        const game = getGameObject();
+        if (game?.handleGoToMarketplace) {
+            game.handleGoToMarketplace(itemHrid, enhancementLevel);
+        }
+        // Silently fail if game API unavailable - feature still provides value without auto-navigation
+    }
+
+    /**
+     * House Upgrade Cost Display
+     * UI rendering for house upgrade costs
+     */
+
+
+    class HouseCostDisplay {
+        constructor() {
+            this.isActive = false;
+            this.currentModalContent = null; // Track current modal to detect room switches
+            this.isInitialized = false;
+            this.currentMaterialsTabs = []; // Track marketplace tabs
+            this.cleanupObserver = null; // Marketplace cleanup observer
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.autofillManager = createAutofillManager('MissingMats-Houses');
+        }
+
+        /**
+         * Setup settings listeners for feature toggle and color changes
+         */
+        setupSettingListener() {
+            config.onSettingChange('houseUpgradeCosts', (value) => {
+                if (value) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+
+            config.onSettingChange('color_accent', () => {
+                if (this.isInitialized) {
+                    this.refresh();
+                }
+            });
+        }
+
+        /**
+         * Initialize the display system
+         */
+        initialize() {
+            if (!config.getSetting('houseUpgradeCosts')) {
+                return;
+            }
+
+            this.isActive = true;
+            this.isInitialized = true;
+
+            // Setup cleanup observer for marketplace tabs (consistent with actions feature)
+            this.cleanupObserver = setupMarketplaceCleanupObserver(
+                () => this.handleMarketplaceCleanup(),
+                this.currentMaterialsTabs
+            );
+
+            this.autofillManager.initialize();
+        }
+
+        /**
+         * Augment native costs section with market pricing
+         * @param {Element} costsSection - The native HousePanel_costs element
+         * @param {string} houseRoomHrid - House room HRID
+         * @param {Element} modalContent - The modal content element
+         */
+        async addCostColumn(costsSection, houseRoomHrid, modalContent) {
+            // Remove any existing augmentation first
+            this.removeExistingColumn(modalContent);
+
+            const currentLevel = houseCostCalculator.getCurrentRoomLevel(houseRoomHrid);
+
+            // Don't show if already max level
+            if (currentLevel >= 8) {
+                return;
+            }
+
+            try {
+                // Add "Cumulative to Level" section
+                await this.addCompactToLevel(costsSection, houseRoomHrid, currentLevel);
+
+                // Mark this modal as processed
+                this.currentModalContent = modalContent;
+            } catch {
+                // Silently fail - augmentation is optional
+            }
+        }
+
+        /**
+         * Remove existing augmentations
+         * @param {Element} modalContent - The modal content element
+         */
+        removeExistingColumn(modalContent) {
+            // Remove all MWI-added elements
+            modalContent
+                .querySelectorAll('.mwi-house-pricing, .mwi-house-pricing-empty, .mwi-house-total, .mwi-house-to-level')
+                .forEach((el) => el.remove());
+
+            // Restore original grid columns
+            const itemRequirementsGrid = modalContent.querySelector('[class*="HousePanel_itemRequirements"]');
+            if (itemRequirementsGrid) {
+                itemRequirementsGrid.style.gridTemplateColumns = '';
+            }
+        }
+
+        /**
+         * Augment native cost items with market pricing
+         * @param {Element} costsSection - Native costs section
+         * @param {Object} costData - Cost data from calculator
+         */
+        async augmentNativeCosts(costsSection, costData) {
+            // Find the item requirements grid container
+            const itemRequirementsGrid = costsSection.querySelector('[class*="HousePanel_itemRequirements"]');
+            if (!itemRequirementsGrid) {
+                return;
+            }
+
+            // Modify the grid to accept 4 columns instead of 3
+            // Native grid is: icon | inventory count | input count
+            // We want: icon | inventory count | input count | pricing
+            const currentGridStyle = window.getComputedStyle(itemRequirementsGrid).gridTemplateColumns;
+
+            // Add a 4th column for pricing (auto width)
+            itemRequirementsGrid.style.gridTemplateColumns = currentGridStyle + ' auto';
+
+            // Find all item containers (these have the icons)
+            const itemContainers = itemRequirementsGrid.querySelectorAll('[class*="Item_itemContainer"]');
+            if (itemContainers.length === 0) {
+                return;
+            }
+
+            for (const itemContainer of itemContainers) {
+                // Game uses SVG sprites, not img tags
+                const svg = itemContainer.querySelector('svg');
+                if (!svg) continue;
+
+                // Extract item name from href (e.g., #lumber -> lumber)
+                const useElement = svg.querySelector('use');
+                const hrefValue = useElement?.getAttribute('href') || '';
+                const itemName = hrefValue.split('#')[1];
+                if (!itemName) continue;
+
+                // Convert to item HRID
+                const itemHrid = `/items/${itemName}`;
+
+                // Find matching material in costData
+                let materialData;
+                if (itemHrid === '/items/coin') {
+                    materialData = {
+                        itemHrid: '/items/coin',
+                        count: costData.coins,
+                        marketPrice: 1,
+                        totalValue: costData.coins,
+                    };
+                } else {
+                    materialData = costData.materials.find((m) => m.itemHrid === itemHrid);
+                }
+
+                if (!materialData) continue;
+
+                // Skip coins (no pricing needed)
+                if (materialData.itemHrid === '/items/coin') {
+                    // Add empty cell to maintain grid structure
+                    this.addEmptyCell(itemRequirementsGrid, itemContainer);
+                    continue;
+                }
+
+                // Add pricing as a new grid cell to the right
+                this.addPricingCell(itemRequirementsGrid, itemContainer, materialData);
+            }
+        }
+
+        /**
+         * Add empty cell for coins to maintain grid structure
+         * @param {Element} grid - The requirements grid
+         * @param {Element} itemContainer - The item icon container (badge)
+         */
+        addEmptyCell(grid, itemContainer) {
+            const emptyCell = document.createElement('span');
+            emptyCell.className = 'mwi-house-pricing-empty HousePanel_itemRequirementCell__3hSBN';
+
+            // Insert immediately after the item badge
+            itemContainer.after(emptyCell);
+        }
+
+        /**
+         * Add pricing as a new grid cell to the right of the item
+         * @param {Element} grid - The requirements grid
+         * @param {Element} itemContainer - The item icon container (badge)
+         * @param {Object} materialData - Material data with pricing
+         */
+        addPricingCell(grid, itemContainer, materialData) {
+            // Check if already augmented
+            const nextSibling = itemContainer.nextElementSibling;
+            if (nextSibling?.classList.contains('mwi-house-pricing')) {
+                return;
+            }
+
+            const inventoryCount = houseCostCalculator.getInventoryCount(materialData.itemHrid);
+            const hasEnough = inventoryCount >= materialData.count;
+            const amountNeeded = Math.max(0, materialData.count - inventoryCount);
+
+            // Create pricing cell
+            const pricingCell = document.createElement('span');
+            pricingCell.className = 'mwi-house-pricing HousePanel_itemRequirementCell__3hSBN';
+            pricingCell.style.cssText = `
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.75rem;
+            color: ${config.COLOR_ACCENT};
+            padding-left: 8px;
+            white-space: nowrap;
+        `;
+
+            pricingCell.innerHTML = `
+            <span style="color: ${config.SCRIPT_COLOR_SECONDARY};">@ ${formatters_js.coinFormatter(materialData.marketPrice)}</span>
+            <span style="color: ${config.COLOR_ACCENT}; font-weight: bold;">= ${formatters_js.coinFormatter(materialData.totalValue)}</span>
+            <span style="color: ${hasEnough ? '#4ade80' : '#f87171'}; margin-left: auto; text-align: right;">${formatters_js.coinFormatter(amountNeeded)}</span>
+        `;
+
+            // Insert immediately after the item badge
+            itemContainer.after(pricingCell);
+        }
+
+        /**
+         * Add total cost below native costs section
+         * @param {Element} costsSection - Native costs section
+         * @param {Object} costData - Cost data
+         */
+        addTotalCost(costsSection, costData) {
+            const totalDiv = document.createElement('div');
+            totalDiv.className = 'mwi-house-total';
+            totalDiv.style.cssText = `
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 2px solid ${config.COLOR_ACCENT};
+            font-weight: bold;
+            font-size: 1rem;
+            color: ${config.COLOR_ACCENT};
+            text-align: center;
+        `;
+            totalDiv.textContent = `Total Market Value: ${formatters_js.coinFormatter(costData.totalValue)}`;
+            costsSection.appendChild(totalDiv);
+        }
+
+        /**
+         * Add compact "To Level" section
+         * @param {Element} costsSection - Native costs section
+         * @param {string} houseRoomHrid - House room HRID
+         * @param {number} currentLevel - Current level
+         */
+        async addCompactToLevel(costsSection, houseRoomHrid, currentLevel) {
+            const section = document.createElement('div');
+            section.className = 'mwi-house-to-level';
+            section.style.cssText = `
+            margin-top: 8px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            border: 1px solid ${config.SCRIPT_COLOR_SECONDARY};
+        `;
+
+            // Compact header with inline dropdown
+            const headerRow = document.createElement('div');
+            headerRow.style.cssText = `
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        `;
+
+            const label = document.createElement('span');
+            label.style.cssText = `
+            color: ${config.COLOR_ACCENT};
+            font-weight: bold;
+            font-size: 0.875rem;
+        `;
+            label.textContent = 'Cumulative to Level:';
+
+            const dropdown = document.createElement('select');
+            dropdown.style.cssText = `
+            padding: 4px 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid ${config.SCRIPT_COLOR_SECONDARY};
+            color: ${config.SCRIPT_COLOR_MAIN};
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        `;
+
+            // Add options
+            for (let level = currentLevel + 1; level <= 8; level++) {
+                const option = document.createElement('option');
+                option.value = level;
+                option.textContent = level;
+                dropdown.appendChild(option);
+            }
+
+            // Default to next level (currentLevel + 1)
+            const defaultLevel = currentLevel + 1;
+            dropdown.value = defaultLevel;
+
+            headerRow.appendChild(label);
+            headerRow.appendChild(dropdown);
+            section.appendChild(headerRow);
+
+            // Cost display container
+            const costContainer = document.createElement('div');
+            costContainer.className = 'mwi-cumulative-cost-container';
+            costContainer.style.cssText = `
+            font-size: 0.875rem;
+            margin-top: 8px;
+            text-align: left;
+        `;
+            section.appendChild(costContainer);
+
+            // Initial render
+            await this.updateCompactCumulativeDisplay(costContainer, houseRoomHrid, currentLevel, parseInt(dropdown.value));
+
+            // Update on change
+            dropdown.addEventListener('change', async () => {
+                await this.updateCompactCumulativeDisplay(
+                    costContainer,
+                    houseRoomHrid,
+                    currentLevel,
+                    parseInt(dropdown.value)
+                );
+            });
+
+            costsSection.parentElement.appendChild(section);
+        }
+
+        /**
+         * Update compact cumulative display
+         * @param {Element} container - Container element
+         * @param {string} houseRoomHrid - House room HRID
+         * @param {number} currentLevel - Current level
+         * @param {number} targetLevel - Target level
+         */
+        async updateCompactCumulativeDisplay(container, houseRoomHrid, currentLevel, targetLevel) {
+            container.innerHTML = '';
+
+            const costData = await houseCostCalculator.calculateCumulativeCost(houseRoomHrid, currentLevel, targetLevel);
+
+            // Materials list as vertical stack of single-line rows
+            const materialsList = document.createElement('div');
+            materialsList.style.cssText = `
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        `;
+
+            // Coins first
+            if (costData.coins > 0) {
+                this.appendMaterialRow(materialsList, {
+                    itemHrid: '/items/coin',
+                    count: costData.coins,
+                    totalValue: costData.coins,
+                });
+            }
+
+            // Materials
+            for (const material of costData.materials) {
+                this.appendMaterialRow(materialsList, material);
+            }
+
+            container.appendChild(materialsList);
+
+            // Total
+            const totalDiv = document.createElement('div');
+            totalDiv.style.cssText = `
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 2px solid ${config.COLOR_ACCENT};
+            font-weight: bold;
+            font-size: 1rem;
+            color: ${config.COLOR_ACCENT};
+            text-align: center;
+        `;
+            totalDiv.textContent = `Total Market Value: ${formatters_js.coinFormatter(costData.totalValue)}`;
+            container.appendChild(totalDiv);
+
+            // Add Missing Mats Marketplace button if any materials are missing
+            const missingMaterials = this.getMissingMaterials(costData);
+            if (missingMaterials.length > 0) {
+                const button = this.createMissingMaterialsButton(missingMaterials);
+                container.appendChild(button);
+            }
+        }
+
+        /**
+         * Append material row as single-line compact format
+         * @param {Element} container - The container element
+         * @param {Object} material - Material data
+         */
+        appendMaterialRow(container, material) {
+            const itemName = houseCostCalculator.getItemName(material.itemHrid);
+            const inventoryCount = houseCostCalculator.getInventoryCount(material.itemHrid);
+            const hasEnough = inventoryCount >= material.count;
+            const amountNeeded = Math.max(0, material.count - inventoryCount);
+            const isCoin = material.itemHrid === '/items/coin';
+
+            const row = document.createElement('div');
+            row.style.cssText = `
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+            line-height: 1.4;
+        `;
+
+            // [inv / req] - left side
+            const inventorySpan = document.createElement('span');
+            inventorySpan.style.cssText = `
+            color: ${hasEnough ? 'white' : '#f87171'};
+            min-width: 120px;
+            text-align: right;
+        `;
+            inventorySpan.textContent = `${formatters_js.coinFormatter(inventoryCount)} / ${formatters_js.coinFormatter(material.count)}`;
+            row.appendChild(inventorySpan);
+
+            // [Badge] Material Name
+            const nameSpan = document.createElement('span');
+            nameSpan.style.cssText = `
+            color: white;
+            min-width: 140px;
+        `;
+            nameSpan.textContent = itemName;
+            row.appendChild(nameSpan);
+
+            // @ price = total (skip for coins)
+            if (!isCoin) {
+                const pricingSpan = document.createElement('span');
+                pricingSpan.style.cssText = `
+                color: ${config.COLOR_ACCENT};
+                min-width: 180px;
+            `;
+                pricingSpan.textContent = `@ ${formatters_js.coinFormatter(material.marketPrice)} = ${formatters_js.coinFormatter(material.totalValue)}`;
+                row.appendChild(pricingSpan);
+            } else {
+                // Empty spacer for coins
+                const spacer = document.createElement('span');
+                spacer.style.minWidth = '180px';
+                row.appendChild(spacer);
+            }
+
+            // Missing: X - right side
+            const missingSpan = document.createElement('span');
+            missingSpan.style.cssText = `
+            color: ${hasEnough ? '#4ade80' : '#f87171'};
+            margin-left: auto;
+            text-align: right;
+        `;
+            missingSpan.textContent = `Missing: ${formatters_js.coinFormatter(amountNeeded)}`;
+            row.appendChild(missingSpan);
+
+            container.appendChild(row);
+        }
+
+        /**
+         * Get missing materials from cost data
+         * @param {Object} costData - Cost data from calculator
+         * @returns {Array} Array of missing materials in marketplace format
+         */
+        getMissingMaterials(costData) {
+            const gameData = dataManager.getInitClientData();
+            const inventory = dataManager.getInventory();
+            const missing = [];
+
+            // Process all materials (skip coins)
+            for (const material of costData.materials) {
+                // Only count items in inventory (not equipped) with no enhancement
+                // Enhanced items and equipped items cannot be used for house construction
+                const inventoryItem = inventory.find(
+                    (i) =>
+                        i.itemHrid === material.itemHrid &&
+                        i.itemLocationHrid === '/item_locations/inventory' &&
+                        (!i.enhancementLevel || i.enhancementLevel === 0)
+                );
+                const have = inventoryItem?.count || 0;
+                const missingAmount = Math.max(0, material.count - have);
+
+                // Only include if missing > 0
+                if (missingAmount > 0) {
+                    const itemDetails = gameData.itemDetailMap[material.itemHrid];
+                    if (itemDetails) {
+                        missing.push({
+                            itemHrid: material.itemHrid,
+                            itemName: itemDetails.name,
+                            missing: missingAmount,
+                            isTradeable: itemDetails.isTradable === true,
+                        });
+                    }
+                }
+            }
+
+            return missing;
+        }
+
+        /**
+         * Create missing materials marketplace button
+         * @param {Array} missingMaterials - Array of missing material objects
+         * @returns {HTMLElement} Button element
+         */
+        createMissingMaterialsButton(missingMaterials) {
+            const button = document.createElement('button');
+            button.style.cssText = `
+            width: 100%;
+            padding: 10px 16px;
+            margin-top: 12px;
+            background: linear-gradient(180deg, rgba(91, 141, 239, 0.2) 0%, rgba(91, 141, 239, 0.1) 100%);
+            color: #ffffff;
+            border: 1px solid rgba(91, 141, 239, 0.4);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        `;
+            button.textContent = 'Missing Mats Marketplace';
+
+            // Hover effects
+            button.addEventListener('mouseenter', () => {
+                button.style.background =
+                    'linear-gradient(180deg, rgba(91, 141, 239, 0.35) 0%, rgba(91, 141, 239, 0.25) 100%)';
+                button.style.borderColor = 'rgba(91, 141, 239, 0.6)';
+                button.style.boxShadow = '0 3px 6px rgba(0, 0, 0, 0.3)';
+            });
+
+            button.addEventListener('mouseleave', () => {
+                button.style.background =
+                    'linear-gradient(180deg, rgba(91, 141, 239, 0.2) 0%, rgba(91, 141, 239, 0.1) 100%)';
+                button.style.borderColor = 'rgba(91, 141, 239, 0.4)';
+                button.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.2)';
+            });
+
+            // Click handler
+            button.addEventListener('click', async () => {
+                await this.handleMissingMaterialsClick(missingMaterials);
+            });
+
+            return button;
+        }
+
+        /**
+         * Handle missing materials button click
+         * @param {Array} missingMaterials - Array of missing material objects
+         */
+        async handleMissingMaterialsClick(missingMaterials) {
+            // Navigate to marketplace
+            const success = await this.navigateToMarketplace();
+            if (!success) {
+                console.error('[HouseCostDisplay] Failed to navigate to marketplace');
+                return;
+            }
+
+            // Wait for marketplace to settle
+            await new Promise((resolve) => {
+                const delayTimeout = setTimeout(resolve, 200);
+                this.timerRegistry.registerTimeout(delayTimeout);
+            });
+
+            // Create custom tabs
+            this.createMissingMaterialTabs(missingMaterials);
+        }
+
+        /**
+         * Navigate to marketplace by clicking navbar
+         * @returns {Promise<boolean>} True if successful
+         */
+        async navigateToMarketplace() {
+            // Find marketplace navbar button
+            const navButtons = document.querySelectorAll('.NavigationBar_nav__3uuUl');
+            const marketplaceButton = Array.from(navButtons).find((nav) => {
+                const svg = nav.querySelector('svg[aria-label="navigationBar.marketplace"]');
+                return svg !== null;
+            });
+
+            if (!marketplaceButton) {
+                console.error('[HouseCostDisplay] Marketplace navbar button not found');
+                return false;
+            }
+
+            // Click button
+            marketplaceButton.click();
+
+            // Wait for marketplace to appear
+            return await this.waitForMarketplace();
+        }
+
+        /**
+         * Wait for marketplace panel to appear
+         * @returns {Promise<boolean>} True if marketplace appeared
+         */
+        async waitForMarketplace() {
+            const maxAttempts = 50;
+            const delayMs = 100;
+
+            for (let i = 0; i < maxAttempts; i++) {
+                const tabsContainer = document.querySelector('.MuiTabs-flexContainer[role="tablist"]');
+                if (tabsContainer) {
+                    const hasMarketListings = Array.from(tabsContainer.children).some((btn) =>
+                        btn.textContent.includes('Market Listings')
+                    );
+                    if (hasMarketListings) {
+                        return true;
+                    }
+                }
+
+                await new Promise((resolve) => {
+                    const delayTimeout = setTimeout(resolve, delayMs);
+                    this.timerRegistry.registerTimeout(delayTimeout);
+                });
+            }
+
+            console.error('[HouseCostDisplay] Marketplace did not open within timeout');
+            return false;
+        }
+
+        /**
+         * Create custom tabs for missing materials
+         * @param {Array} missingMaterials - Array of missing material objects
+         */
+        createMissingMaterialTabs(missingMaterials) {
+            const tabsContainer = document.querySelector('.MuiTabs-flexContainer[role="tablist"]');
+            if (!tabsContainer) {
+                console.error('[HouseCostDisplay] Tabs container not found');
+                return;
+            }
+
+            // Remove existing custom tabs
+            removeMaterialTabs();
+
+            // Get reference tab
+            const referenceTab = Array.from(tabsContainer.children).find((btn) => btn.textContent.includes('My Listings'));
+            if (!referenceTab) {
+                console.error('[HouseCostDisplay] Reference tab not found');
+                return;
+            }
+
+            // Enable flex wrapping
+            tabsContainer.style.flexWrap = 'wrap';
+
+            // Use event delegation on tabs container to clear quantity when regular tabs are clicked
+            // This avoids memory leaks from adding listeners to each tab repeatedly
+            if (!tabsContainer.hasAttribute('data-mwi-delegated-listener')) {
+                tabsContainer.setAttribute('data-mwi-delegated-listener', 'true');
+                tabsContainer.addEventListener('click', (e) => {
+                    // Check if clicked element is a regular tab (not our custom tab)
+                    const clickedTab = e.target.closest('button');
+                    if (clickedTab && !clickedTab.hasAttribute('data-mwi-custom-tab')) {
+                        this.autofillManager.clearQuantity();
+                    }
+                });
+            }
+
+            // Create tab for each missing material
+            this.currentMaterialsTabs.length = 0; // Clear without reassigning (preserves observer reference)
+            for (const material of missingMaterials) {
+                const tab = createMaterialTab(material, referenceTab, (_e, mat) => {
+                    // Store the missing quantity for auto-fill when buy modal opens
+                    this.autofillManager.setQuantity(mat.missing);
+                    // Navigate to marketplace
+                    navigateToMarketplace(mat.itemHrid, 0);
+                });
+                tabsContainer.appendChild(tab);
+                this.currentMaterialsTabs.push(tab);
+            }
+        }
+
+        /**
+         * Handle marketplace cleanup (when leaving marketplace)
+         * Called by the marketplace cleanup observer
+         */
+        handleMarketplaceCleanup() {
+            removeMaterialTabs();
+            this.currentMaterialsTabs.length = 0; // Clear without reassigning (preserves observer reference)
+            this.autofillManager.clearQuantity();
+        }
+
+        /**
+         * Refresh colors on existing displays
+         */
+        refresh() {
+            // Update pricing cell colors
+            document.querySelectorAll('.mwi-house-pricing').forEach((cell) => {
+                cell.style.color = config.COLOR_ACCENT;
+                const boldSpan = cell.querySelector('span[style*="font-weight: bold"]');
+                if (boldSpan) {
+                    boldSpan.style.color = config.COLOR_ACCENT;
+                }
+            });
+
+            // Update total cost colors
+            document.querySelectorAll('.mwi-house-total').forEach((total) => {
+                total.style.borderTopColor = config.COLOR_ACCENT;
+                total.style.color = config.COLOR_ACCENT;
+            });
+
+            // Update "To Level" label colors
+            document.querySelectorAll('.mwi-house-to-level span[style*="font-weight: bold"]').forEach((label) => {
+                label.style.color = config.COLOR_ACCENT;
+            });
+
+            // Update cumulative total colors
+            document.querySelectorAll('.mwi-cumulative-cost-container span[style*="font-weight: bold"]').forEach((span) => {
+                span.style.color = config.COLOR_ACCENT;
+            });
+        }
+
+        /**
+         * Disable the feature
+         */
+        disable() {
+            // Remove all MWI-added elements
+            document
+                .querySelectorAll('.mwi-house-pricing, .mwi-house-pricing-empty, .mwi-house-total, .mwi-house-to-level')
+                .forEach((el) => el.remove());
+
+            // Restore all grid columns
+            document.querySelectorAll('[class*="HousePanel_itemRequirements"]').forEach((grid) => {
+                grid.style.gridTemplateColumns = '';
+            });
+
+            // Clean up marketplace tabs and observer
+            this.handleMarketplaceCleanup();
+            if (this.cleanupObserver) {
+                this.cleanupObserver();
+                this.cleanupObserver = null;
+            }
+
+            this.autofillManager.cleanup();
+            this.timerRegistry.clearAll();
+
+            this.currentModalContent = null;
+            this.isActive = false;
+            this.isInitialized = false;
+        }
+    }
+
+    const houseCostDisplay = new HouseCostDisplay();
+    houseCostDisplay.setupSettingListener();
+
+    /**
+     * House Panel Observer
+     * Detects house upgrade modal and injects cost displays
+     */
+
+
+    class HousePanelObserver {
+        constructor() {
+            this.isActive = false;
+            this.cleanupRegistry = cleanupRegistry_js.createCleanupRegistry();
+            this.processedCards = new WeakSet();
+        }
+
+        /**
+         * Initialize the observer
+         */
+        async initialize() {
+            if (this.isActive) return;
+
+            // Initialize calculator
+            await houseCostCalculator.initialize();
+
+            // Initialize display
+            houseCostDisplay.initialize();
+
+            // Register modal observer
+            this.registerObservers();
+
+            this.isActive = true;
+        }
+
+        /**
+         * Register DOM observers
+         */
+        registerObservers() {
+            // Watch for house modal appearing
+            const unregisterModal = domObserver.onClass(
+                'HousePanelObserver-Modal',
+                'HousePanel_modalContent',
+                (modalContent) => {
+                    this.handleHouseModal(modalContent);
+                }
+            );
+            this.cleanupRegistry.registerCleanup(unregisterModal);
+        }
+
+        /**
+         * Handle house modal appearing
+         * @param {Element} modalContent - The house panel modal content element
+         */
+        async handleHouseModal(modalContent) {
+            // Wait a moment for content to fully load
+            await new Promise((resolve) => {
+                const loadTimeout = setTimeout(resolve, 100);
+                this.cleanupRegistry.registerTimeout(loadTimeout);
+            });
+
+            // Modal shows one room at a time, not a grid
+            // Process the currently displayed room
+            await this.processModalContent(modalContent);
+
+            // Set up observer for room switching
+            this.observeModalChanges(modalContent);
+        }
+
+        /**
+         * Process the modal content (single room display)
+         * @param {Element} modalContent - The house panel modal content
+         */
+        async processModalContent(modalContent) {
+            // Identify which room is currently displayed
+            const houseRoomHrid = this.identifyRoomFromModal(modalContent);
+
+            if (!houseRoomHrid) {
+                return;
+            }
+
+            // Find the costs section to add our column
+            const costsSection = modalContent.querySelector('[class*="HousePanel_costs"]');
+
+            if (!costsSection) {
+                return;
+            }
+
+            // Add our cost display as a column
+            await houseCostDisplay.addCostColumn(costsSection, houseRoomHrid, modalContent);
+        }
+
+        /**
+         * Identify house room HRID from modal header
+         * @param {Element} modalContent - The modal content element
+         * @returns {string|null} House room HRID
+         */
+        identifyRoomFromModal(modalContent) {
+            const initData = dataManager.getInitClientData();
+            if (!initData || !initData.houseRoomDetailMap) {
+                return null;
+            }
+
+            // Get room name from header
+            const header = modalContent.querySelector('[class*="HousePanel_header"]');
+            if (!header) {
+                return null;
+            }
+
+            const roomName = header.textContent.trim();
+
+            // Match against room names in game data
+            for (const [hrid, roomData] of Object.entries(initData.houseRoomDetailMap)) {
+                if (roomData.name === roomName) {
+                    return hrid;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Observe modal for room switching
+         * @param {Element} modalContent - The house panel modal content
+         */
+        observeModalChanges(modalContent) {
+            const observer = domObserverHelpers_js.createMutationWatcher(
+                modalContent,
+                (mutations) => {
+                    // Check if header changed (indicates room switch)
+                    for (const mutation of mutations) {
+                        if (mutation.type === 'childList' || mutation.type === 'characterData') {
+                            const header = modalContent.querySelector('[class*="HousePanel_header"]');
+                            if (header && mutation.target.contains(header)) {
+                                // Room switched, reprocess
+                                this.processModalContent(modalContent);
+                                break;
+                            }
+                        }
+                    }
+                },
+                {
+                    childList: true,
+                    subtree: true,
+                    characterData: true,
+                }
+            );
+            this.cleanupRegistry.registerCleanup(observer);
+        }
+
+        /**
+         * Disable the observer
+         */
+        disable() {
+            this.cleanup();
+        }
+
+        /**
+         * Clean up observers
+         */
+        cleanup() {
+            this.cleanupRegistry.cleanupAll();
+            this.cleanupRegistry = cleanupRegistry_js.createCleanupRegistry();
+            this.processedCards = new WeakSet();
+            this.isActive = false;
+        }
+    }
+
+    const housePanelObserver = new HousePanelObserver();
+
+    var settingsCSS = "/* Toolasha Settings UI Styles\n * Modern, compact design\n */\n\n/* CSS Variables */\n:root {\n    --toolasha-accent: #5b8def;\n    --toolasha-accent-hover: #7aa3f3;\n    --toolasha-accent-dim: rgba(91, 141, 239, 0.15);\n    --toolasha-secondary: #8A2BE2;\n    --toolasha-text: rgba(255, 255, 255, 0.9);\n    --toolasha-text-dim: rgba(255, 255, 255, 0.5);\n    --toolasha-bg: rgba(20, 25, 35, 0.6);\n    --toolasha-border: rgba(91, 141, 239, 0.2);\n    --toolasha-toggle-off: rgba(100, 100, 120, 0.4);\n    --toolasha-toggle-on: var(--toolasha-accent);\n}\n\n/* Settings Card Container */\n.toolasha-settings-card {\n    display: flex;\n    flex-direction: column;\n    padding: 12px 16px;\n    font-size: 12px;\n    line-height: 1.3;\n    color: var(--toolasha-text);\n    position: relative;\n    overflow-y: auto;\n    gap: 6px;\n    max-height: calc(100vh - 250px);\n}\n\n/* Top gradient line */\n.toolasha-settings-card::before {\n    display: none;\n}\n\n/* Scrollbar styling */\n.toolasha-settings-card::-webkit-scrollbar {\n    width: 6px;\n}\n\n.toolasha-settings-card::-webkit-scrollbar-track {\n    background: transparent;\n}\n\n.toolasha-settings-card::-webkit-scrollbar-thumb {\n    background: var(--toolasha-accent);\n    border-radius: 3px;\n    opacity: 0.5;\n}\n\n.toolasha-settings-card::-webkit-scrollbar-thumb:hover {\n    opacity: 1;\n}\n\n/* Collapsible Settings Groups */\n.toolasha-settings-group {\n    margin-bottom: 8px;\n}\n\n.toolasha-settings-group-header {\n    cursor: pointer;\n    user-select: none;\n    margin: 10px 0 4px 0;\n    color: var(--toolasha-accent);\n    font-weight: 600;\n    font-size: 13px;\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    border-bottom: 1px solid var(--toolasha-border);\n    padding-bottom: 3px;\n    text-transform: uppercase;\n    letter-spacing: 0.5px;\n    transition: color 0.2s ease;\n}\n\n.toolasha-settings-group-header:hover {\n    color: var(--toolasha-accent-hover);\n}\n\n.toolasha-settings-group-header .collapse-icon {\n    font-size: 10px;\n    transition: transform 0.2s ease;\n}\n\n.toolasha-settings-group.collapsed .collapse-icon {\n    transform: rotate(-90deg);\n}\n\n.toolasha-settings-group-content {\n    max-height: 5000px;\n    overflow: hidden;\n    transition: max-height 0.3s ease-out;\n}\n\n.toolasha-settings-group.collapsed .toolasha-settings-group-content {\n    max-height: 0;\n}\n\n/* Section Headers */\n.toolasha-settings-card h3 {\n    margin: 10px 0 4px 0;\n    color: var(--toolasha-accent);\n    font-weight: 600;\n    font-size: 13px;\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    border-bottom: 1px solid var(--toolasha-border);\n    padding-bottom: 3px;\n    text-transform: uppercase;\n    letter-spacing: 0.5px;\n}\n\n.toolasha-settings-card h3:first-child {\n    margin-top: 0;\n}\n\n.toolasha-settings-card h3 .icon {\n    font-size: 14px;\n}\n\n/* Individual Setting Row */\n.toolasha-setting {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin: 0;\n    padding: 6px 8px;\n    background: var(--toolasha-bg);\n    border: 1px solid var(--toolasha-border);\n    border-radius: 4px;\n    min-height: unset;\n    transition: all 0.2s ease;\n}\n\n.toolasha-setting:hover {\n    background: rgba(30, 35, 45, 0.7);\n    border-color: var(--toolasha-accent);\n}\n\n.toolasha-setting.disabled {\n    /* Visual darkening removed - dependencies still functional but not visually indicated */\n    pointer-events: none;\n}\n\n.toolasha-setting.not-implemented .toolasha-setting-label {\n    color: #ff6b6b;\n}\n\n.toolasha-setting.not-implemented .toolasha-setting-help {\n    color: rgba(255, 107, 107, 0.7);\n}\n\n.toolasha-setting-label {\n    text-align: left;\n    flex: 1;\n    margin-right: 10px;\n    line-height: 1.3;\n    font-size: 12px;\n}\n\n.toolasha-setting-help {\n    display: block;\n    font-size: 10px;\n    color: var(--toolasha-text-dim);\n    margin-top: 2px;\n    font-style: italic;\n}\n\n.toolasha-setting-input {\n    flex-shrink: 0;\n}\n\n/* Modern Toggle Switch */\n.toolasha-switch {\n    position: relative;\n    width: 38px;\n    height: 20px;\n    flex-shrink: 0;\n    display: inline-block;\n}\n\n.toolasha-switch input {\n    opacity: 0;\n    width: 0;\n    height: 0;\n    position: absolute;\n}\n\n.toolasha-slider {\n    position: absolute;\n    top: 0;\n    left: 0;\n    right: 0;\n    bottom: 0;\n    background: var(--toolasha-toggle-off);\n    border-radius: 20px;\n    cursor: pointer;\n    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);\n    border: 2px solid transparent;\n}\n\n.toolasha-slider:before {\n    content: \"\";\n    position: absolute;\n    height: 12px;\n    width: 12px;\n    left: 2px;\n    bottom: 2px;\n    background: white;\n    border-radius: 50%;\n    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);\n    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);\n}\n\n.toolasha-switch input:checked + .toolasha-slider {\n    background: var(--toolasha-toggle-on);\n    border-color: var(--toolasha-accent-hover);\n    box-shadow: 0 0 6px var(--toolasha-accent-dim);\n}\n\n.toolasha-switch input:checked + .toolasha-slider:before {\n    transform: translateX(18px);\n}\n\n.toolasha-switch:hover .toolasha-slider {\n    border-color: var(--toolasha-accent);\n}\n\n/* Text Input */\n.toolasha-text-input {\n    padding: 5px 8px;\n    border: 1px solid var(--toolasha-border);\n    border-radius: 3px;\n    background: rgba(0, 0, 0, 0.3);\n    color: var(--toolasha-text);\n    min-width: 100px;\n    font-size: 12px;\n    transition: all 0.2s ease;\n}\n\n.toolasha-text-input:focus {\n    outline: none;\n    border-color: var(--toolasha-accent);\n    box-shadow: 0 0 0 2px var(--toolasha-accent-dim);\n}\n\n/* Number Input */\n.toolasha-number-input {\n    padding: 5px 8px;\n    border: 1px solid var(--toolasha-border);\n    border-radius: 3px;\n    background: rgba(0, 0, 0, 0.3);\n    color: var(--toolasha-text);\n    min-width: 80px;\n    font-size: 12px;\n    transition: all 0.2s ease;\n}\n\n.toolasha-number-input:focus {\n    outline: none;\n    border-color: var(--toolasha-accent);\n    box-shadow: 0 0 0 2px var(--toolasha-accent-dim);\n}\n\n/* Select Dropdown */\n.toolasha-select-input {\n    padding: 5px 8px;\n    border: 1px solid var(--toolasha-border);\n    border-radius: 3px;\n    background: rgba(0, 0, 0, 0.3);\n    color: var(--toolasha-accent);\n    font-weight: 600;\n    min-width: 150px;\n    cursor: pointer;\n    font-size: 12px;\n    -webkit-appearance: none;\n    -moz-appearance: none;\n    appearance: none;\n    background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20width%3D%2220%22%20height%3D%2220%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M5%207l5%205%205-5z%22%20fill%3D%22%235b8def%22%2F%3E%3C%2Fsvg%3E');\n    background-repeat: no-repeat;\n    background-position: right 6px center;\n    background-size: 14px;\n    padding-right: 28px;\n    transition: all 0.2s ease;\n}\n\n.toolasha-select-input:focus {\n    outline: none;\n    border-color: var(--toolasha-accent);\n    box-shadow: 0 0 0 2px var(--toolasha-accent-dim);\n}\n\n.toolasha-select-input option {\n    background: #1a1a2e;\n    color: var(--toolasha-text);\n    padding: 8px;\n}\n\n/* Utility Buttons Container */\n.toolasha-utility-buttons {\n    display: flex;\n    gap: 8px;\n    margin-top: 12px;\n    padding-top: 10px;\n    border-top: 1px solid var(--toolasha-border);\n    flex-wrap: wrap;\n}\n\n.toolasha-utility-button {\n    background: linear-gradient(135deg, var(--toolasha-secondary), #6A1B9A);\n    border: 1px solid rgba(138, 43, 226, 0.4);\n    color: #ffffff;\n    padding: 6px 12px;\n    border-radius: 4px;\n    font-size: 11px;\n    font-weight: 600;\n    cursor: pointer;\n    transition: all 0.2s ease;\n    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);\n}\n\n.toolasha-utility-button:hover {\n    background: linear-gradient(135deg, #9A4BCF, var(--toolasha-secondary));\n    box-shadow: 0 0 10px rgba(138, 43, 226, 0.3);\n    transform: translateY(-1px);\n}\n\n.toolasha-utility-button:active {\n    transform: translateY(0);\n}\n\n/* Sync button - special styling for prominence */\n.toolasha-sync-button {\n    background: linear-gradient(135deg, #047857, #059669) !important;\n    border: 1px solid rgba(4, 120, 87, 0.4) !important;\n    flex: 1 1 auto; /* Allow it to grow and take more space */\n    min-width: 200px; /* Ensure it's wide enough for the text */\n}\n\n.toolasha-sync-button:hover {\n    background: linear-gradient(135deg, #059669, #10b981) !important;\n    box-shadow: 0 0 10px rgba(16, 185, 129, 0.3) !important;\n}\n\n/* Refresh Notice */\n.toolasha-refresh-notice {\n    background: rgba(255, 152, 0, 0.1);\n    border: 1px solid rgba(255, 152, 0, 0.3);\n    border-radius: 4px;\n    padding: 8px 12px;\n    margin-top: 10px;\n    color: #ffa726;\n    font-size: 11px;\n    display: flex;\n    align-items: center;\n    gap: 8px;\n}\n\n.toolasha-refresh-notice::before {\n    content: \"⚠️\";\n    font-size: 14px;\n}\n\n/* Dependency Indicator */\n.toolasha-setting.has-dependency::before {\n    content: \"↳\";\n    position: absolute;\n    left: -4px;\n    color: var(--toolasha-accent);\n    font-size: 14px;\n    opacity: 0.5;\n}\n\n.toolasha-setting.has-dependency {\n    margin-left: 16px;\n    position: relative;\n}\n\n/* Nested setting collapse icons */\n.setting-collapse-icon {\n    flex-shrink: 0;\n    color: var(--toolasha-accent);\n    opacity: 0.7;\n}\n\n.toolasha-setting.dependents-collapsed .setting-collapse-icon {\n    opacity: 1;\n}\n\n.toolasha-setting-label-container:hover .setting-collapse-icon {\n    opacity: 1;\n}\n\n/* Tab Panel Override (for game's settings panel) */\n.TabPanel_tabPanel__tXMJF#toolasha-settings {\n    display: block !important;\n}\n\n.TabPanel_tabPanel__tXMJF#toolasha-settings.TabPanel_hidden__26UM3 {\n    display: none !important;\n}\n";
+
+    /**
+     * Settings UI Module
+     * Injects Toolasha settings tab into the game's settings panel
+     * Based on MWITools Extended approach
+     */
+
+
+    class SettingsUI {
+        constructor() {
+            this.config = config;
+            this.settingsPanel = null;
+            this.settingsObserver = null;
+            this.settingsObserverCleanup = null;
+            this.currentSettings = {};
+            this.isInjecting = false; // Guard against concurrent injection
+            this.characterSwitchHandler = null; // Store listener reference to prevent duplicates
+            this.settingsPanelCallbacks = []; // Callbacks to run when settings panel appears
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize the settings UI
+         */
+        async initialize() {
+            // Inject CSS styles (check if already injected)
+            if (!document.getElementById('toolasha-settings-styles')) {
+                this.injectStyles();
+            }
+
+            // Load current settings
+            this.currentSettings = await settingsStorage.loadSettings();
+
+            // Set up handler for character switching (ONLY if not already registered)
+            if (!this.characterSwitchHandler) {
+                this.characterSwitchHandler = () => {
+                    this.handleCharacterSwitch();
+                };
+                dataManager.on('character_initialized', this.characterSwitchHandler);
+            }
+
+            // Wait for game's settings panel to load
+            this.observeSettingsPanel();
+        }
+
+        /**
+         * Register a callback to be called when settings panel appears
+         * @param {Function} callback - Function to call when settings panel is detected
+         */
+        onSettingsPanelAppear(callback) {
+            if (typeof callback === 'function') {
+                this.settingsPanelCallbacks.push(callback);
+            }
+        }
+
+        /**
+         * Handle character switch
+         * Clean up old observers and re-initialize for new character's settings panel
+         */
+        handleCharacterSwitch() {
+            // Clean up old DOM references and observers (but keep listener registered)
+            this.cleanupDOM();
+
+            // Wait for settings panel to stabilize before re-observing
+            const reobserveTimeout = setTimeout(() => {
+                this.observeSettingsPanel();
+            }, 500);
+            this.timerRegistry.registerTimeout(reobserveTimeout);
+        }
+
+        /**
+         * Cleanup DOM elements and observers only (internal cleanup during character switch)
+         */
+        cleanupDOM() {
+            this.timerRegistry.clearAll();
+
+            // Stop observer
+            if (this.settingsObserver) {
+                this.settingsObserver.disconnect();
+                this.settingsObserver = null;
+            }
+
+            if (this.settingsObserverCleanup) {
+                this.settingsObserverCleanup();
+                this.settingsObserverCleanup = null;
+            }
+
+            // Remove settings tab
+            const tab = document.querySelector('#toolasha-settings-tab');
+            if (tab) {
+                tab.remove();
+            }
+
+            // Remove settings panel
+            const panel = document.querySelector('#toolasha-settings');
+            if (panel) {
+                panel.remove();
+            }
+
+            // Clear state
+            this.settingsPanel = null;
+            this.currentSettings = {};
+            this.isInjecting = false;
+
+            // Clear config cache
+            this.config.clearSettingsCache();
+        }
+
+        /**
+         * Inject CSS styles into page
+         */
+        injectStyles() {
+            const styleEl = document.createElement('style');
+            styleEl.id = 'toolasha-settings-styles';
+            styleEl.textContent = settingsCSS;
+            document.head.appendChild(styleEl);
+        }
+
+        /**
+         * Observe for game's settings panel
+         * Uses MutationObserver to detect when settings panel appears
+         */
+        observeSettingsPanel() {
+            // Wait for DOM to be ready before observing
+            const startObserver = () => {
+                if (!document.body) {
+                    const observerDelay = setTimeout(startObserver, 10);
+                    this.timerRegistry.registerTimeout(observerDelay);
+                    return;
+                }
+
+                const onMutation = (_mutations) => {
+                    // Look for the settings tabs container
+                    const tabsContainer = document.querySelector('div[class*="SettingsPanel_tabsComponentContainer"]');
+
+                    if (tabsContainer) {
+                        // Check if our tab already exists before injecting
+                        if (!tabsContainer.querySelector('#toolasha-settings-tab')) {
+                            this.injectSettingsTab();
+                        }
+
+                        // Call registered callbacks for other features
+                        this.settingsPanelCallbacks.forEach((callback) => {
+                            try {
+                                callback();
+                            } catch (error) {
+                                console.error('[Toolasha Settings] Callback error:', error);
+                            }
+                        });
+
+                        // Keep observer running - panel might be removed/re-added if user navigates away and back
+                    }
+                };
+
+                // Observe the main game panel for changes
+                const gamePanel = document.querySelector('div[class*="GamePage_gamePanel"]');
+                if (gamePanel) {
+                    this.settingsObserverCleanup = domObserverHelpers_js.createMutationWatcher(gamePanel, onMutation, {
+                        childList: true,
+                        subtree: true,
+                    });
+                } else {
+                    // Fallback: observe entire body if game panel not found (Firefox timing issue)
+                    console.warn('[Toolasha Settings] Could not find game panel, observing body instead');
+                    this.settingsObserverCleanup = domObserverHelpers_js.createMutationWatcher(document.body, onMutation, {
+                        childList: true,
+                        subtree: true,
+                    });
+                }
+
+                // Store observer reference (for compatibility with existing cleanup path)
+                this.settingsObserver = null;
+
+                // Also check immediately in case settings is already open
+                const existingTabsContainer = document.querySelector('div[class*="SettingsPanel_tabsComponentContainer"]');
+                if (existingTabsContainer && !existingTabsContainer.querySelector('#toolasha-settings-tab')) {
+                    this.injectSettingsTab();
+
+                    // Call registered callbacks for other features
+                    this.settingsPanelCallbacks.forEach((callback) => {
+                        try {
+                            callback();
+                        } catch (error) {
+                            console.error('[Toolasha Settings] Callback error:', error);
+                        }
+                    });
+                }
+            };
+
+            startObserver();
+        }
+
+        /**
+         * Inject Toolasha settings tab into game's settings panel
+         */
+        async injectSettingsTab() {
+            // Guard against concurrent injection
+            if (this.isInjecting) {
+                return;
+            }
+            this.isInjecting = true;
+
+            try {
+                // Find tabs container (MWIt-E approach)
+                const tabsComponentContainer = document.querySelector('div[class*="SettingsPanel_tabsComponentContainer"]');
+
+                if (!tabsComponentContainer) {
+                    console.warn('[Toolasha Settings] Could not find tabsComponentContainer');
+                    return;
+                }
+
+                // Find the MUI tabs flexContainer
+                const tabsContainer = tabsComponentContainer.querySelector('[class*="MuiTabs-flexContainer"]');
+                const tabPanelsContainer = tabsComponentContainer.querySelector(
+                    '[class*="TabsComponent_tabPanelsContainer"]'
+                );
+
+                if (!tabsContainer || !tabPanelsContainer) {
+                    console.warn('[Toolasha Settings] Could not find tabs or panels container');
+                    return;
+                }
+
+                // Check if already injected
+                if (tabsContainer.querySelector('#toolasha-settings-tab')) {
+                    return;
+                }
+
+                // Reload current settings from storage to ensure latest values
+                this.currentSettings = await settingsStorage.loadSettings();
+
+                // Get existing tabs for reference
+                const existingTabs = Array.from(tabsContainer.querySelectorAll('button[role="tab"]'));
+
+                // Create new tab button
+                const tabButton = this.createTabButton();
+
+                // Create tab panel
+                const tabPanel = this.createTabPanel();
+
+                // Setup tab switching
+                this.setupTabSwitching(tabButton, tabPanel, existingTabs, tabPanelsContainer);
+
+                // Append to DOM
+                tabsContainer.appendChild(tabButton);
+                tabPanelsContainer.appendChild(tabPanel);
+
+                // Store reference
+                this.settingsPanel = tabPanel;
+            } catch (error) {
+                console.error('[Toolasha Settings] Error during tab injection:', error);
+            } finally {
+                // Always reset the guard flag
+                this.isInjecting = false;
+            }
+        }
+
+        /**
+         * Create tab button
+         * @returns {HTMLElement} Tab button element
+         */
+        createTabButton() {
+            const button = document.createElement('button');
+            button.id = 'toolasha-settings-tab';
+            button.setAttribute('role', 'tab');
+            button.setAttribute('aria-selected', 'false');
+            button.setAttribute('tabindex', '-1');
+            button.className = 'MuiButtonBase-root MuiTab-root MuiTab-textColorPrimary';
+            button.style.minWidth = '90px';
+
+            const span = document.createElement('span');
+            span.className = 'MuiTab-wrapper';
+            span.textContent = 'Toolasha';
+
+            button.appendChild(span);
+
+            return button;
+        }
+
+        /**
+         * Create tab panel with all settings
+         * @returns {HTMLElement} Tab panel element
+         */
+        createTabPanel() {
+            const panel = document.createElement('div');
+            panel.id = 'toolasha-settings';
+            panel.className = 'TabPanel_tabPanel__tXMJF TabPanel_hidden__26UM3';
+            panel.setAttribute('role', 'tabpanel');
+            panel.style.display = 'none';
+
+            // Create settings card
+            const card = document.createElement('div');
+            card.className = 'toolasha-settings-card';
+            card.id = 'toolasha-settings-content';
+
+            // Add search box at the top
+            this.addSearchBox(card);
+
+            // Generate settings from config
+            this.generateSettings(card);
+
+            // Add utility buttons
+            this.addUtilityButtons(card);
+
+            // Add refresh notice
+            this.addRefreshNotice(card);
+
+            panel.appendChild(card);
+
+            // Add change listener
+            card.addEventListener('change', (e) => this.handleSettingChange(e));
+
+            // Add click listener for template edit buttons
+            card.addEventListener('click', (e) => {
+                if (e.target.classList.contains('toolasha-template-edit-btn')) {
+                    const settingId = e.target.dataset.settingId;
+                    this.openTemplateEditor(settingId);
+                }
+            });
+
+            return panel;
+        }
+
+        /**
+         * Generate all settings UI from config
+         * @param {HTMLElement} container - Container element
+         */
+        generateSettings(container) {
+            for (const [groupKey, group] of Object.entries(settingsSchema_js.settingsGroups)) {
+                // Create collapsible group container
+                const groupContainer = document.createElement('div');
+                groupContainer.className = 'toolasha-settings-group';
+                groupContainer.dataset.group = groupKey;
+
+                // Add section header with collapse toggle
+                const header = document.createElement('h3');
+                header.className = 'toolasha-settings-group-header';
+                header.innerHTML = `
+                <span class="collapse-icon">▼</span>
+                <span class="icon">${group.icon}</span>
+                ${group.title}
+            `;
+                // Bind toggleGroup method to this instance
+                header.addEventListener('click', this.toggleGroup.bind(this, groupContainer));
+
+                // Create content container for this group
+                const content = document.createElement('div');
+                content.className = 'toolasha-settings-group-content';
+
+                // Add settings in this group
+                for (const [settingId, settingDef] of Object.entries(group.settings)) {
+                    const settingEl = this.createSettingElement(settingId, settingDef);
+                    content.appendChild(settingEl);
+                }
+
+                groupContainer.appendChild(header);
+                groupContainer.appendChild(content);
+                container.appendChild(groupContainer);
+            }
+        }
+
+        /**
+         * Setup collapse icons for parent settings (settings that have dependents)
+         * @param {HTMLElement} container - Settings container
+         */
+        /**
+         * Toggle group collapse/expand
+         * @param {HTMLElement} groupContainer - Group container element
+         */
+        toggleGroup(groupContainer) {
+            groupContainer.classList.toggle('collapsed');
+        }
+
+        /**
+         * Create a single setting UI element
+         * @param {string} settingId - Setting ID
+         * @param {Object} settingDef - Setting definition
+         * @returns {HTMLElement} Setting element
+         */
+        createSettingElement(settingId, settingDef) {
+            const div = document.createElement('div');
+            div.className = 'toolasha-setting';
+            div.dataset.settingId = settingId;
+            div.dataset.type = settingDef.type || 'checkbox';
+
+            // Add not-implemented class for red text
+            if (settingDef.notImplemented) {
+                div.classList.add('not-implemented');
+            }
+
+            // Create label container
+            const labelContainer = document.createElement('div');
+            labelContainer.className = 'toolasha-setting-label-container';
+            labelContainer.style.display = 'flex';
+            labelContainer.style.alignItems = 'center';
+            labelContainer.style.flex = '1';
+            labelContainer.style.gap = '6px';
+
+            // Create label
+            const label = document.createElement('span');
+            label.className = 'toolasha-setting-label';
+            label.textContent = settingDef.label;
+
+            // Add help text if present
+            if (settingDef.help) {
+                const help = document.createElement('span');
+                help.className = 'toolasha-setting-help';
+                help.textContent = settingDef.help;
+                label.appendChild(help);
+            }
+
+            labelContainer.appendChild(label);
+
+            // Create input
+            const inputHTML = this.generateSettingInput(settingId, settingDef);
+            const inputContainer = document.createElement('div');
+            inputContainer.className = 'toolasha-setting-input';
+            inputContainer.innerHTML = inputHTML;
+
+            div.appendChild(labelContainer);
+            div.appendChild(inputContainer);
+
+            return div;
+        }
+
+        /**
+         * Generate input HTML for a setting
+         * @param {string} settingId - Setting ID
+         * @param {Object} settingDef - Setting definition
+         * @returns {string} Input HTML
+         */
+        generateSettingInput(settingId, settingDef) {
+            const currentSetting = this.currentSettings[settingId];
+            const type = settingDef.type || 'checkbox';
+
+            switch (type) {
+                case 'checkbox': {
+                    const checked = currentSetting?.isTrue ?? settingDef.default ?? false;
+                    return `
+                    <label class="toolasha-switch">
+                        <input type="checkbox" id="${settingId}" ${checked ? 'checked' : ''}>
+                        <span class="toolasha-slider"></span>
+                    </label>
+                `;
+                }
+
+                case 'text': {
+                    const value = currentSetting?.value ?? settingDef.default ?? '';
+                    return `
+                    <input type="text"
+                        id="${settingId}"
+                        class="toolasha-text-input"
+                        value="${value}"
+                        placeholder="${settingDef.placeholder || ''}">
+                `;
+                }
+
+                case 'template': {
+                    const value = currentSetting?.value ?? settingDef.default ?? [];
+                    // Store as JSON string
+                    const jsonValue = JSON.stringify(value);
+                    const escapedValue = jsonValue.replace(/"/g, '&quot;');
+
+                    return `
+                    <input type="hidden"
+                        id="${settingId}"
+                        value="${escapedValue}">
+                    <button type="button"
+                        class="toolasha-template-edit-btn"
+                        data-setting-id="${settingId}"
+                        style="
+                            background: #4a7c59;
+                            border: 1px solid #5a8c69;
+                            border-radius: 4px;
+                            padding: 6px 12px;
+                            color: #e0e0e0;
+                            cursor: pointer;
+                            font-size: 13px;
+                            white-space: nowrap;
+                            transition: all 0.2s;
+                        ">
+                        Edit Template
+                    </button>
+                `;
+                }
+
+                case 'number': {
+                    const value = currentSetting?.value ?? settingDef.default ?? 0;
+                    return `
+                    <input type="number"
+                        id="${settingId}"
+                        class="toolasha-number-input"
+                        value="${value}"
+                        min="${settingDef.min ?? ''}"
+                        max="${settingDef.max ?? ''}"
+                        step="${settingDef.step ?? '1'}">
+                `;
+                }
+
+                case 'select': {
+                    const value = currentSetting?.value ?? settingDef.default ?? '';
+                    const options = settingDef.options || [];
+                    const optionsHTML = options
+                        .map((option) => {
+                            const optValue = typeof option === 'object' ? option.value : option;
+                            const optLabel = typeof option === 'object' ? option.label : option;
+                            const selected = optValue === value ? 'selected' : '';
+                            return `<option value="${optValue}" ${selected}>${optLabel}</option>`;
+                        })
+                        .join('');
+
+                    return `
+                    <select id="${settingId}" class="toolasha-select-input">
+                        ${optionsHTML}
+                    </select>
+                `;
+                }
+
+                case 'color': {
+                    const value = currentSetting?.value ?? settingDef.value ?? settingDef.default ?? '#000000';
+                    return `
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <input type="color"
+                            id="${settingId}"
+                            class="toolasha-color-input"
+                            value="${value}">
+                        <input type="text"
+                            id="${settingId}_text"
+                            class="toolasha-color-text-input"
+                            value="${value}"
+                            style="width: 80px; padding: 4px; background: #2a2a2a; color: white; border: 1px solid #555; border-radius: 3px;"
+                            readonly>
+                    </div>
+                `;
+                }
+
+                case 'slider': {
+                    const value = currentSetting?.value ?? settingDef.default ?? 0;
+                    return `
+                    <div style="display: flex; align-items: center; gap: 12px; width: 100%;">
+                        <input type="range"
+                            id="${settingId}"
+                            class="toolasha-slider-input"
+                            value="${value}"
+                            min="${settingDef.min ?? 0}"
+                            max="${settingDef.max ?? 1}"
+                            step="${settingDef.step ?? 0.01}"
+                            style="flex: 1;">
+                        <span id="${settingId}_value" class="toolasha-slider-value" style="min-width: 50px; color: #aaa; font-size: 0.9em;">${value}</span>
+                    </div>
+                `;
+                }
+
+                default:
+                    return `<span style="color: red;">Unknown type: ${type}</span>`;
+            }
+        }
+
+        /**
+         * Add search box to filter settings
+         * @param {HTMLElement} container - Container element
+         */
+        addSearchBox(container) {
+            const searchContainer = document.createElement('div');
+            searchContainer.className = 'toolasha-search-container';
+            searchContainer.style.cssText = `
+            margin-bottom: 20px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        `;
+
+            // Search input
+            const searchInput = document.createElement('input');
+            searchInput.type = 'text';
+            searchInput.className = 'toolasha-search-input';
+            searchInput.placeholder = 'Search settings...';
+            searchInput.style.cssText = `
+            flex: 1;
+            padding: 8px 12px;
+            background: #2a2a2a;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 4px;
+            font-size: 14px;
+        `;
+
+            // Clear button
+            const clearButton = document.createElement('button');
+            clearButton.textContent = 'Clear';
+            clearButton.className = 'toolasha-search-clear';
+            clearButton.style.cssText = `
+            padding: 8px 16px;
+            background: #444;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+            clearButton.style.display = 'none'; // Hidden by default
+
+            // Filter function
+            const filterSettings = (query) => {
+                const lowerQuery = query.toLowerCase().trim();
+
+                // If query is empty, show everything
+                if (!lowerQuery) {
+                    // Show all settings
+                    document.querySelectorAll('.toolasha-setting').forEach((setting) => {
+                        setting.style.display = 'flex';
+                    });
+                    // Show all groups
+                    document.querySelectorAll('.toolasha-settings-group').forEach((group) => {
+                        group.style.display = 'block';
+                    });
+                    clearButton.style.display = 'none';
+                    return;
+                }
+
+                clearButton.style.display = 'block';
+
+                // Filter settings
+                document.querySelectorAll('.toolasha-settings-group').forEach((group) => {
+                    let visibleCount = 0;
+
+                    group.querySelectorAll('.toolasha-setting').forEach((setting) => {
+                        const label = setting.querySelector('.toolasha-setting-label')?.textContent || '';
+                        const help = setting.querySelector('.toolasha-setting-help')?.textContent || '';
+                        const searchText = (label + ' ' + help).toLowerCase();
+
+                        if (searchText.includes(lowerQuery)) {
+                            setting.style.display = 'flex';
+                            visibleCount++;
+                        } else {
+                            setting.style.display = 'none';
+                        }
+                    });
+
+                    // Hide group if no visible settings
+                    if (visibleCount === 0) {
+                        group.style.display = 'none';
+                    } else {
+                        group.style.display = 'block';
+                    }
+                });
+            };
+
+            // Input event listener
+            searchInput.addEventListener('input', (e) => {
+                filterSettings(e.target.value);
+            });
+
+            // Clear button event listener
+            clearButton.addEventListener('click', () => {
+                searchInput.value = '';
+                filterSettings('');
+                searchInput.focus();
+            });
+
+            searchContainer.appendChild(searchInput);
+            searchContainer.appendChild(clearButton);
+            container.appendChild(searchContainer);
+        }
+
+        /**
+         * Add utility buttons (Reset, Export, Import, Fetch Prices)
+         * @param {HTMLElement} container - Container element
+         */
+        addUtilityButtons(container) {
+            const buttonsDiv = document.createElement('div');
+            buttonsDiv.className = 'toolasha-utility-buttons';
+
+            // Sync button (at top - most important)
+            const syncBtn = document.createElement('button');
+            syncBtn.textContent = 'Copy Settings to All Characters';
+            syncBtn.className = 'toolasha-utility-button toolasha-sync-button';
+            syncBtn.addEventListener('click', () => this.handleSync());
+
+            // Fetch Latest Prices button
+            const fetchPricesBtn = document.createElement('button');
+            fetchPricesBtn.textContent = '🔄 Fetch Latest Prices';
+            fetchPricesBtn.className = 'toolasha-utility-button toolasha-fetch-prices-button';
+            fetchPricesBtn.addEventListener('click', () => this.handleFetchPrices(fetchPricesBtn));
+
+            // Reset button
+            const resetBtn = document.createElement('button');
+            resetBtn.textContent = 'Reset to Defaults';
+            resetBtn.className = 'toolasha-utility-button';
+            resetBtn.addEventListener('click', () => this.handleReset());
+
+            // Export button
+            const exportBtn = document.createElement('button');
+            exportBtn.textContent = 'Export Settings';
+            exportBtn.className = 'toolasha-utility-button';
+            exportBtn.addEventListener('click', () => this.handleExport());
+
+            // Import button
+            const importBtn = document.createElement('button');
+            importBtn.textContent = 'Import Settings';
+            importBtn.className = 'toolasha-utility-button';
+            importBtn.addEventListener('click', () => this.handleImport());
+
+            buttonsDiv.appendChild(syncBtn);
+            buttonsDiv.appendChild(fetchPricesBtn);
+            buttonsDiv.appendChild(resetBtn);
+            buttonsDiv.appendChild(exportBtn);
+            buttonsDiv.appendChild(importBtn);
+
+            container.appendChild(buttonsDiv);
+        }
+
+        /**
+         * Add refresh notice
+         * @param {HTMLElement} container - Container element
+         */
+        addRefreshNotice(container) {
+            const notice = document.createElement('div');
+            notice.className = 'toolasha-refresh-notice';
+            notice.textContent = 'Some settings require a page refresh to take effect';
+            container.appendChild(notice);
+        }
+
+        /**
+         * Setup tab switching functionality
+         * @param {HTMLElement} tabButton - Toolasha tab button
+         * @param {HTMLElement} tabPanel - Toolasha tab panel
+         * @param {HTMLElement[]} existingTabs - Existing tab buttons
+         * @param {HTMLElement} tabPanelsContainer - Tab panels container
+         */
+        setupTabSwitching(tabButton, tabPanel, existingTabs, tabPanelsContainer) {
+            const switchToTab = (targetButton, targetPanel) => {
+                // Hide all panels
+                const allPanels = tabPanelsContainer.querySelectorAll('[class*="TabPanel_tabPanel"]');
+                allPanels.forEach((panel) => {
+                    panel.style.display = 'none';
+                    panel.classList.add('TabPanel_hidden__26UM3');
+                });
+
+                // Deactivate all buttons
+                const allButtons = document.querySelectorAll('button[role="tab"]');
+                allButtons.forEach((btn) => {
+                    btn.setAttribute('aria-selected', 'false');
+                    btn.setAttribute('tabindex', '-1');
+                    btn.classList.remove('Mui-selected');
+                });
+
+                // Activate target
+                targetButton.setAttribute('aria-selected', 'true');
+                targetButton.setAttribute('tabindex', '0');
+                targetButton.classList.add('Mui-selected');
+                targetPanel.style.display = 'block';
+                targetPanel.classList.remove('TabPanel_hidden__26UM3');
+
+                // Update title
+                const titleEl = document.querySelector('[class*="SettingsPanel_title"]');
+                if (titleEl) {
+                    if (targetButton.id === 'toolasha-settings-tab') {
+                        titleEl.textContent = '⚙️ Toolasha Settings (refresh to apply)';
+                    } else {
+                        titleEl.textContent = 'Settings';
+                    }
+                }
+            };
+
+            // Click handler for Toolasha tab
+            tabButton.addEventListener('click', () => {
+                switchToTab(tabButton, tabPanel);
+            });
+
+            // Click handlers for existing tabs
+            existingTabs.forEach((existingTab, index) => {
+                existingTab.addEventListener('click', () => {
+                    const correspondingPanel = tabPanelsContainer.children[index];
+                    if (correspondingPanel) {
+                        switchToTab(existingTab, correspondingPanel);
+                    }
+                });
+            });
+        }
+
+        /**
+         * Handle setting change
+         * @param {Event} event - Change event
+         */
+        async handleSettingChange(event) {
+            const input = event.target;
+            if (!input.id) return;
+
+            const settingId = input.id;
+            const type = input.closest('.toolasha-setting')?.dataset.type || 'checkbox';
+
+            let value;
+
+            // Get value based on type
+            if (type === 'checkbox') {
+                value = input.checked;
+            } else if (type === 'number' || type === 'slider') {
+                value = parseFloat(input.value) || 0;
+                // Update the slider value display if it's a slider
+                if (type === 'slider') {
+                    const valueDisplay = document.getElementById(`${settingId}_value`);
+                    if (valueDisplay) {
+                        valueDisplay.textContent = value;
+                    }
+                }
+            } else if (type === 'color') {
+                value = input.value;
+                // Update the text display
+                const textInput = document.getElementById(`${settingId}_text`);
+                if (textInput) {
+                    textInput.value = value;
+                }
+            } else {
+                value = input.value;
+            }
+
+            // Save to storage
+            await settingsStorage.setSetting(settingId, value);
+
+            // Update local cache immediately
+            if (!this.currentSettings[settingId]) {
+                this.currentSettings[settingId] = {};
+            }
+            if (type === 'checkbox') {
+                this.currentSettings[settingId].isTrue = value;
+            } else {
+                this.currentSettings[settingId].value = value;
+            }
+
+            // Update config module (for backward compatibility)
+            if (type === 'checkbox') {
+                this.config.setSetting(settingId, value);
+            } else {
+                this.config.setSettingValue(settingId, value);
+            }
+
+            // Apply color settings immediately if this is a color setting
+            if (type === 'color') {
+                this.config.applyColorSettings();
+            }
+        }
+
+        /**
+         * Handle sync settings to all characters
+         */
+        async handleSync() {
+            // Get character count to show in confirmation
+            const characterCount = await this.config.getKnownCharacterCount();
+
+            // If only 1 character (current), no need to sync
+            if (characterCount <= 1) {
+                alert('You only have one character. Settings are already saved for this character.');
+                return;
+            }
+
+            // Confirm action
+            const otherCharacters = characterCount - 1;
+            const message = `This will copy your current settings to ${otherCharacters} other character${otherCharacters > 1 ? 's' : ''}. Their existing settings will be overwritten.\n\nContinue?`;
+
+            if (!confirm(message)) {
+                return;
+            }
+
+            // Perform sync
+            const result = await this.config.syncSettingsToAllCharacters();
+
+            // Show result
+            if (result.success) {
+                alert(`Settings successfully copied to ${result.count} character${result.count > 1 ? 's' : ''}!`);
+            } else {
+                alert(`Failed to sync settings: ${result.error || 'Unknown error'}`);
+            }
+        }
+
+        /**
+         * Handle fetch latest prices
+         * @param {HTMLElement} button - Button element for state updates
+         */
+        async handleFetchPrices(button) {
+            // Disable button and show loading state
+            const originalText = button.textContent;
+            button.disabled = true;
+            button.textContent = '⏳ Fetching...';
+
+            try {
+                // Clear cache and fetch fresh data
+                const result = await marketAPI.clearCacheAndRefetch();
+
+                if (result) {
+                    // Success - clear listing price display cache to force re-render
+                    document.querySelectorAll('.mwi-listing-prices-set').forEach((table) => {
+                        table.classList.remove('mwi-listing-prices-set');
+                    });
+
+                    // Show success state
+                    button.textContent = '✅ Updated!';
+                    button.style.backgroundColor = '#00ff00';
+                    button.style.color = '#000';
+
+                    // Reset button after 2 seconds
+                    const resetSuccessTimeout = setTimeout(() => {
+                        button.textContent = originalText;
+                        button.style.backgroundColor = '';
+                        button.style.color = '';
+                        button.disabled = false;
+                    }, 2000);
+                    this.timerRegistry.registerTimeout(resetSuccessTimeout);
+                } else {
+                    // Failed - show error state
+                    button.textContent = '❌ Failed';
+                    button.style.backgroundColor = '#ff0000';
+
+                    // Reset button after 3 seconds
+                    const resetFailureTimeout = setTimeout(() => {
+                        button.textContent = originalText;
+                        button.style.backgroundColor = '';
+                        button.disabled = false;
+                    }, 3000);
+                    this.timerRegistry.registerTimeout(resetFailureTimeout);
+                }
+            } catch (error) {
+                console.error('[SettingsUI] Fetch prices failed:', error);
+
+                // Show error state
+                button.textContent = '❌ Error';
+                button.style.backgroundColor = '#ff0000';
+
+                // Reset button after 3 seconds
+                const resetErrorTimeout = setTimeout(() => {
+                    button.textContent = originalText;
+                    button.style.backgroundColor = '';
+                    button.disabled = false;
+                }, 3000);
+                this.timerRegistry.registerTimeout(resetErrorTimeout);
+            }
+        }
+
+        /**
+         * Handle reset to defaults
+         */
+        async handleReset() {
+            if (!confirm('Reset all settings to defaults? This cannot be undone.')) {
+                return;
+            }
+
+            await settingsStorage.resetToDefaults();
+            await this.config.resetToDefaults();
+
+            alert('Settings reset to defaults. Please refresh the page.');
+            window.location.reload();
+        }
+
+        /**
+         * Handle export settings
+         */
+        async handleExport() {
+            const json = await settingsStorage.exportSettings();
+
+            // Create download
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `toolasha-settings-${new Date().toISOString().slice(0, 10)}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        /**
+         * Handle import settings
+         */
+        async handleImport() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+
+            input.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                try {
+                    const text = await file.text();
+                    const success = await settingsStorage.importSettings(text);
+
+                    if (success) {
+                        alert('Settings imported successfully. Please refresh the page.');
+                        window.location.reload();
+                    } else {
+                        alert('Failed to import settings. Please check the file format.');
+                    }
+                } catch (error) {
+                    console.error('[Toolasha Settings] Import error:', error);
+                    alert('Failed to import settings.');
+                }
+            });
+
+            input.click();
+        }
+
+        /**
+         * Open template editor modal
+         * @param {string} settingId - Setting ID
+         */
+        openTemplateEditor(settingId) {
+            const setting = this.findSettingDef(settingId);
+            if (!setting || !setting.templateVariables) {
+                return;
+            }
+
+            const input = document.getElementById(settingId);
+            let currentValue = setting.default;
+
+            // Try to parse stored value
+            if (input && input.value) {
+                try {
+                    const parsed = JSON.parse(input.value);
+                    if (Array.isArray(parsed)) {
+                        currentValue = parsed;
+                    }
+                } catch (e) {
+                    console.error('[Settings] Failed to parse template value:', e);
+                }
+            }
+
+            // Ensure currentValue is an array
+            if (!Array.isArray(currentValue)) {
+                currentValue = setting.default || [];
+            }
+
+            // Deep clone to avoid mutating original
+            const templateItems = JSON.parse(JSON.stringify(currentValue));
+
+            // Create overlay
+            const overlay = document.createElement('div');
+            overlay.className = 'toolasha-template-editor-overlay';
+            overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 100000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+            // Create modal
+            const modal = document.createElement('div');
+            modal.className = 'toolasha-template-editor-modal';
+            modal.style.cssText = `
+            background: #1a1a1a;
+            border: 2px solid #3a3a3a;
+            border-radius: 8px;
+            padding: 20px;
+            max-width: 700px;
+            width: 90%;
+            max-height: 90%;
+            overflow-y: auto;
+            color: #e0e0e0;
+        `;
+
+            // Header
+            const header = document.createElement('div');
+            header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #3a3a3a;
+            padding-bottom: 10px;
+        `;
+            header.innerHTML = `
+            <h3 style="margin: 0; color: #e0e0e0;">Edit Template</h3>
+            <button class="toolasha-template-close-btn" style="
+                background: none;
+                border: none;
+                color: #e0e0e0;
+                font-size: 32px;
+                cursor: pointer;
+                padding: 0;
+                line-height: 1;
+            ">×</button>
+        `;
+
+            // Template list section
+            const listSection = document.createElement('div');
+            listSection.style.cssText = 'margin-bottom: 20px;';
+            listSection.innerHTML =
+                '<h4 style="margin: 0 0 10px 0; color: #e0e0e0;">Template Items (drag to reorder):</h4>';
+
+            const listContainer = document.createElement('div');
+            listContainer.className = 'toolasha-template-list';
+            listContainer.style.cssText = `
+            background: #2a2a2a;
+            border: 1px solid #4a4a4a;
+            border-radius: 4px;
+            padding: 10px;
+            min-height: 200px;
+            max-height: 300px;
+            overflow-y: auto;
+        `;
+
+            const renderList = () => {
+                listContainer.innerHTML = '';
+                templateItems.forEach((item, index) => {
+                    const itemEl = this.createTemplateListItem(item, index, templateItems, renderList);
+                    listContainer.appendChild(itemEl);
+                });
+            };
+
+            renderList();
+            listSection.appendChild(listContainer);
+
+            // Available variables section
+            const variablesSection = document.createElement('div');
+            variablesSection.style.cssText = 'margin-bottom: 20px;';
+            variablesSection.innerHTML = '<h4 style="margin: 0 0 10px 0; color: #e0e0e0;">Add Variable:</h4>';
+
+            const variablesContainer = document.createElement('div');
+            variablesContainer.style.cssText = `
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        `;
+
+            for (const variable of setting.templateVariables) {
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.textContent = '+  ' + variable.label;
+                chip.title = variable.description;
+                chip.style.cssText = `
+                background: #2a2a2a;
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                padding: 6px 12px;
+                color: #e0e0e0;
+                cursor: pointer;
+                font-size: 13px;
+                transition: all 0.2s;
+            `;
+                chip.onmouseover = () => {
+                    chip.style.background = '#3a3a3a';
+                    chip.style.borderColor = '#5a5a5a';
+                };
+                chip.onmouseout = () => {
+                    chip.style.background = '#2a2a2a';
+                    chip.style.borderColor = '#4a4a4a';
+                };
+                chip.onclick = () => {
+                    templateItems.push({
+                        type: 'variable',
+                        key: variable.key,
+                        label: variable.label,
+                    });
+                    renderList();
+                };
+                variablesContainer.appendChild(chip);
+            }
+
+            // Add text button
+            const addTextBtn = document.createElement('button');
+            addTextBtn.type = 'button';
+            addTextBtn.textContent = '+ Add Text';
+            addTextBtn.style.cssText = `
+            background: #2a2a2a;
+            border: 1px solid #4a4a4a;
+            border-radius: 4px;
+            padding: 6px 12px;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        `;
+            addTextBtn.onmouseover = () => {
+                addTextBtn.style.background = '#3a3a3a';
+                addTextBtn.style.borderColor = '#5a5a5a';
+            };
+            addTextBtn.onmouseout = () => {
+                addTextBtn.style.background = '#2a2a2a';
+                addTextBtn.style.borderColor = '#4a4a4a';
+            };
+            addTextBtn.onclick = () => {
+                const text = prompt('Enter text:');
+                if (text !== null && text !== '') {
+                    templateItems.push({
+                        type: 'text',
+                        value: text,
+                    });
+                    renderList();
+                }
+            };
+
+            variablesContainer.appendChild(addTextBtn);
+            variablesSection.appendChild(variablesContainer);
+
+            // Buttons
+            const buttonsSection = document.createElement('div');
+            buttonsSection.style.cssText = `
+            display: flex;
+            gap: 10px;
+            justify-content: space-between;
+            margin-top: 20px;
+        `;
+
+            // Restore to Default button (left side)
+            const restoreBtn = document.createElement('button');
+            restoreBtn.type = 'button';
+            restoreBtn.textContent = 'Restore to Default';
+            restoreBtn.style.cssText = `
+            background: #6b5b3a;
+            border: 1px solid #8b7b5a;
+            border-radius: 4px;
+            padding: 8px 16px;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+            restoreBtn.onclick = () => {
+                if (confirm('Reset template to default? This will discard your current template.')) {
+                    // Reset to default
+                    templateItems.length = 0;
+                    const defaultTemplate = setting.default || [];
+                    templateItems.push(...JSON.parse(JSON.stringify(defaultTemplate)));
+                    renderList();
+                }
+            };
+
+            // Right side buttons container
+            const rightButtons = document.createElement('div');
+            rightButtons.style.cssText = 'display: flex; gap: 10px;';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = `
+            background: #2a2a2a;
+            border: 1px solid #4a4a4a;
+            border-radius: 4px;
+            padding: 8px 16px;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+            cancelBtn.onclick = () => overlay.remove();
+
+            const saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.textContent = 'Save';
+            saveBtn.style.cssText = `
+            background: #4a7c59;
+            border: 1px solid #5a8c69;
+            border-radius: 4px;
+            padding: 8px 16px;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+            saveBtn.onclick = () => {
+                const input = document.getElementById(settingId);
+                if (input) {
+                    input.value = JSON.stringify(templateItems);
+                    // Trigger change event
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                overlay.remove();
+            };
+
+            rightButtons.appendChild(cancelBtn);
+            rightButtons.appendChild(saveBtn);
+
+            buttonsSection.appendChild(restoreBtn);
+            buttonsSection.appendChild(rightButtons);
+
+            // Assemble modal
+            modal.appendChild(header);
+            modal.appendChild(listSection);
+            modal.appendChild(variablesSection);
+            modal.appendChild(buttonsSection);
+            overlay.appendChild(modal);
+
+            // Close button handler
+            header.querySelector('.toolasha-template-close-btn').onclick = () => overlay.remove();
+
+            // Close on overlay click
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    overlay.remove();
+                }
+            };
+
+            // Add to page
+            document.body.appendChild(overlay);
+        }
+
+        /**
+         * Create a draggable template list item
+         * @param {Object} item - Template item
+         * @param {number} index - Item index
+         * @param {Array} items - All items
+         * @param {Function} renderList - Callback to re-render list
+         * @returns {HTMLElement} List item element
+         */
+        createTemplateListItem(item, index, items, renderList) {
+            const itemEl = document.createElement('div');
+            itemEl.draggable = true;
+            itemEl.dataset.index = index;
+            itemEl.style.cssText = `
+            background: #1a1a1a;
+            border: 1px solid #4a4a4a;
+            border-radius: 4px;
+            padding: 8px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: move;
+            transition: all 0.2s;
+        `;
+
+            // Drag handle
+            const dragHandle = document.createElement('span');
+            dragHandle.textContent = '⋮⋮';
+            dragHandle.style.cssText = `
+            color: #666;
+            font-size: 16px;
+            cursor: move;
+        `;
+
+            // Content
+            const content = document.createElement('div');
+            content.style.cssText = 'flex: 1; color: #e0e0e0; font-size: 13px;';
+
+            if (item.type === 'variable') {
+                content.innerHTML = `<strong style="color: #4a9eff;">${item.label}</strong> <span style="color: #666; font-family: monospace;">${item.key}</span>`;
+            } else {
+                // Editable text
+                const textInput = document.createElement('input');
+                textInput.type = 'text';
+                textInput.value = item.value;
+                textInput.style.cssText = `
+                background: #2a2a2a;
+                border: 1px solid #4a4a4a;
+                border-radius: 3px;
+                padding: 4px 8px;
+                color: #e0e0e0;
+                font-size: 13px;
+                width: 100%;
+            `;
+                textInput.onchange = () => {
+                    items[index].value = textInput.value;
+                };
+                content.appendChild(textInput);
+            }
+
+            // Delete button
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.textContent = '×';
+            deleteBtn.title = 'Remove';
+            deleteBtn.style.cssText = `
+            background: #8b0000;
+            border: 1px solid #a00000;
+            border-radius: 3px;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+            padding: 4px 8px;
+            transition: all 0.2s;
+        `;
+            deleteBtn.onmouseover = () => {
+                deleteBtn.style.background = '#a00000';
+            };
+            deleteBtn.onmouseout = () => {
+                deleteBtn.style.background = '#8b0000';
+            };
+            deleteBtn.onclick = () => {
+                items.splice(index, 1);
+                renderList();
+            };
+
+            // Drag events
+            itemEl.ondragstart = (e) => {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', index);
+                itemEl.style.opacity = '0.5';
+            };
+
+            itemEl.ondragend = () => {
+                itemEl.style.opacity = '1';
+            };
+
+            itemEl.ondragover = (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                itemEl.style.borderColor = '#4a9eff';
+            };
+
+            itemEl.ondragleave = () => {
+                itemEl.style.borderColor = '#4a4a4a';
+            };
+
+            itemEl.ondrop = (e) => {
+                e.preventDefault();
+                itemEl.style.borderColor = '#4a4a4a';
+
+                const dragIndex = parseInt(e.dataTransfer.getData('text/plain'));
+                const dropIndex = index;
+
+                if (dragIndex !== dropIndex) {
+                    // Remove from old position
+                    const [movedItem] = items.splice(dragIndex, 1);
+                    // Insert at new position
+                    items.splice(dropIndex, 0, movedItem);
+                    renderList();
+                }
+            };
+
+            itemEl.appendChild(dragHandle);
+            itemEl.appendChild(content);
+            itemEl.appendChild(deleteBtn);
+
+            return itemEl;
+        }
+
+        /**
+         * Find setting definition by ID
+         * @param {string} settingId - Setting ID
+         * @returns {Object|null} Setting definition
+         */
+        findSettingDef(settingId) {
+            for (const group of Object.values(settingsSchema_js.settingsGroups)) {
+                if (group.settings[settingId]) {
+                    return group.settings[settingId];
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Cleanup for full shutdown (not character switching)
+         * Unregisters event listeners and removes all DOM elements
+         */
+        cleanup() {
+            // Clean up DOM elements first
+            this.cleanupDOM();
+
+            if (this.characterSwitchHandler) {
+                dataManager.off('character_initialized', this.characterSwitchHandler);
+                this.characterSwitchHandler = null;
+            }
+
+            this.timerRegistry.clearAll();
+        }
+    }
+
+    const settingsUI = new SettingsUI();
+
+    /**
+     * Transmute Rates Module
+     * Shows transmutation success rate percentages in Item Dictionary modal
+     */
+
+
+    /**
+     * TransmuteRates class manages success rate display in Item Dictionary
+     */
+    class TransmuteRates {
+        constructor() {
+            this.unregisterHandlers = [];
+            this.isInitialized = false;
+            this.injectTimeout = null;
+            this.nameToHridCache = new Map();
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Setup setting change listener
+         */
+        setupSettingListener() {
+            config.onSettingChange('itemDictionary_transmuteRates', (enabled) => {
+                if (enabled) {
+                    this.initialize();
+                } else {
+                    this.disable();
+                }
+            });
+
+            // Listen for base rate inclusion toggle
+            config.onSettingChange('itemDictionary_transmuteIncludeBaseRate', () => {
+                if (this.isInitialized) {
+                    this.refreshRates();
+                }
+            });
+
+            config.onSettingChange('color_transmute', () => {
+                if (this.isInitialized) {
+                    this.refreshRates();
+                }
+            });
+        }
+
+        /**
+         * Initialize transmute rates feature
+         */
+        initialize() {
+            if (config.getSetting('itemDictionary_transmuteRates') !== true) {
+                return;
+            }
+
+            if (this.isInitialized) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Watch for individual source items being added to the dictionary
+            const unregister = domObserver.onClass('TransmuteRates', 'ItemDictionary_item', (elem) => {
+                // When a new source item appears, find the parent section and inject rates
+                const section = elem.closest('[class*="ItemDictionary_transmutedFrom"]');
+
+                if (section) {
+                    // Debounce to avoid injecting multiple times as items are added
+                    clearTimeout(this.injectTimeout);
+                    this.injectTimeout = setTimeout(() => {
+                        this.injectRates(section);
+                    }, 50);
+                    this.timerRegistry.registerTimeout(this.injectTimeout);
+                }
+            });
+            this.unregisterHandlers.push(unregister);
+
+            // Check if dictionary is already open
+            const existingSection = document.querySelector('[class*="ItemDictionary_transmutedFrom"]');
+            if (existingSection) {
+                this.injectRates(existingSection);
+            }
+        }
+
+        /**
+         * Inject transmutation success rates into the dictionary
+         * @param {HTMLElement} transmutedFromSection - The "Transmuted From" section
+         */
+        injectRates(transmutedFromSection) {
+            // Get current item name from modal title
+            const titleElem = document.querySelector('[class*="ItemDictionary_title"]');
+            if (!titleElem) {
+                return;
+            }
+
+            const currentItemName = titleElem.textContent.trim();
+            const gameData = dataManager.getInitClientData();
+            if (!gameData) {
+                return;
+            }
+
+            // Build name->HRID cache once for O(1) lookups
+            if (this.nameToHridCache.size === 0) {
+                for (const [hrid, item] of Object.entries(gameData.itemDetailMap)) {
+                    this.nameToHridCache.set(item.name, hrid);
+                }
+            }
+
+            // Find current item HRID by name (O(1) lookup)
+            const currentItemHrid = this.nameToHridCache.get(currentItemName);
+
+            if (!currentItemHrid) {
+                return;
+            }
+
+            // Find all source items in "Transmuted From" list
+            const sourceItems = transmutedFromSection.querySelectorAll('[class*="ItemDictionary_item"]');
+
+            for (const sourceItemElem of sourceItems) {
+                // Remove any existing rate first (in case React re-rendered this item)
+                const existingRate = sourceItemElem.querySelector('.mwi-transmute-rate');
+                if (existingRate) {
+                    existingRate.remove();
+                }
+
+                // Get source item name
+                const nameElem = sourceItemElem.querySelector('[class*="Item_name"]');
+                if (!nameElem) {
+                    continue;
+                }
+
+                const sourceItemName = nameElem.textContent.trim();
+
+                // Find source item HRID by name (O(1) lookup)
+                const sourceItemHrid = this.nameToHridCache.get(sourceItemName);
+
+                if (!sourceItemHrid) {
+                    continue;
+                }
+
+                // Get source item's alchemy details
+                const sourceItem = gameData.itemDetailMap[sourceItemHrid];
+                if (!sourceItem.alchemyDetail || !sourceItem.alchemyDetail.transmuteDropTable) {
+                    continue;
+                }
+
+                const transmuteSuccessRate = sourceItem.alchemyDetail.transmuteSuccessRate;
+
+                // Find current item in source's drop table
+                const dropEntry = sourceItem.alchemyDetail.transmuteDropTable.find(
+                    (entry) => entry.itemHrid === currentItemHrid
+                );
+
+                if (!dropEntry) {
+                    continue;
+                }
+
+                // Calculate effective rate based on setting
+                const includeBaseRate = config.getSetting('itemDictionary_transmuteIncludeBaseRate') !== false;
+                const effectiveRate = includeBaseRate
+                    ? transmuteSuccessRate * dropEntry.dropRate // Total probability
+                    : dropEntry.dropRate; // Conditional probability
+                const percentageText = `${(effectiveRate * 100).toFixed((effectiveRate * 100) % 1 === 0 ? 1 : 2)}%`;
+
+                // Create rate element
+                const rateElem = document.createElement('span');
+                rateElem.className = 'mwi-transmute-rate';
+                rateElem.textContent = ` ~${percentageText}`;
+                rateElem.style.cssText = `
+                position: absolute;
+                right: 0;
+                top: 50%;
+                transform: translateY(-50%);
+                color: ${config.COLOR_TRANSMUTE};
+                font-size: 0.9em;
+                pointer-events: none;
+            `;
+
+                // Make parent container position: relative so absolute positioning works
+                sourceItemElem.style.position = 'relative';
+
+                // Insert as sibling after item box (outside React's control)
+                sourceItemElem.appendChild(rateElem);
+            }
+        }
+
+        /**
+         * Refresh all displayed rates (e.g., after color change)
+         */
+        refreshRates() {
+            // Remove all existing rate displays
+            document.querySelectorAll('.mwi-transmute-rate').forEach((elem) => elem.remove());
+
+            // Re-inject if section is visible
+            const existingSection = document.querySelector('[class*="ItemDictionary_transmutedFrom"]');
+            if (existingSection) {
+                this.injectRates(existingSection);
+            }
+        }
+
+        /**
+         * Disable the feature and clean up
+         */
+        disable() {
+            // Clear any pending injection timeouts
+            clearTimeout(this.injectTimeout);
+            this.timerRegistry.clearAll();
+
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+
+            // Remove all injected rate displays
+            document.querySelectorAll('.mwi-transmute-rate').forEach((elem) => elem.remove());
+
+            // Clear cache
+            this.nameToHridCache.clear();
+
+            this.isInitialized = false;
+        }
+    }
+
+    const transmuteRates = new TransmuteRates();
+
+    // Setup setting listener (always active, even when feature is disabled)
+    transmuteRates.setupSettingListener();
+
+    /**
+     * View Action Button Module
+     * Adds a "View Action" button to Item Dictionary modal for actionable items
+     */
+
+
+    /**
+     * ViewActionButton class manages action button in Item Dictionary
+     */
+    class ViewActionButton {
+        constructor() {
+            this.unregisterHandlers = [];
+            this.isInitialized = false;
+            this.injectTimeout = null;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize view action button feature
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Watch for Item Dictionary modal title to appear
+            const unregister = domObserver.onClass('ViewActionButton', 'ItemDictionary_title', (titleElem) => {
+                // Debounce to avoid injecting multiple times
+                clearTimeout(this.injectTimeout);
+                this.injectTimeout = setTimeout(() => {
+                    this.injectButton(titleElem);
+                }, 50);
+                this.timerRegistry.registerTimeout(this.injectTimeout);
+            });
+            this.unregisterHandlers.push(unregister);
+
+            // Check if dictionary is already open
+            const existingTitle = document.querySelector('[class*="ItemDictionary_title"]');
+            if (existingTitle) {
+                this.injectButton(existingTitle);
+            }
+
+            // Watch for item action menu popups (e.g. clicking an item within an action)
+            const unregisterPopup = domObserver.onClass('ViewActionButton_popup', 'Item_actionMenu', (actionMenu) => {
+                this.injectPopupButton(actionMenu);
+            });
+            this.unregisterHandlers.push(unregisterPopup);
+        }
+
+        /**
+         * Inject "View Action" button into the item action menu popup
+         * @param {HTMLElement} actionMenu - The Item_actionMenu element
+         */
+        injectPopupButton(actionMenu) {
+            if (actionMenu.querySelector('.mwi-view-action-popup-button')) return;
+
+            const nameEl = actionMenu.querySelector('[class*="Item_name"]');
+            if (!nameEl) return;
+
+            const itemName = nameEl.textContent.trim();
+            const itemHrid = `/items/${itemName.toLowerCase().replace(/'/g, '').replace(/\s+/g, '_')}`;
+
+            const actionInfo = findActionForItem(itemHrid);
+            if (!actionInfo) return;
+
+            const btn = document.createElement('button');
+            btn.textContent = 'View Action';
+
+            // Copy class from existing popup button for visual consistency
+            const existingBtn = actionMenu.querySelector('button');
+            if (existingBtn) {
+                btn.className = existingBtn.className;
+            }
+            btn.classList.add('mwi-view-action-popup-button');
+
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                navigateToItem(itemHrid);
+            });
+
+            actionMenu.appendChild(btn);
+        }
+
+        /**
+         * Inject "View Action" button into the dictionary
+         * @param {HTMLElement} titleElem - The modal title element
+         */
+        injectButton(titleElem) {
+            // Remove any existing button first
+            const existingButton = document.querySelector('.mwi-view-action-button');
+            if (existingButton) {
+                existingButton.remove();
+            }
+
+            // Get item name from title
+            const itemName = titleElem.textContent.trim();
+
+            // Convert item name to HRID format (lowercase, spaces to underscores, remove apostrophes)
+            const itemHrid = `/items/${itemName.toLowerCase().replace(/'/g, '').replace(/\s+/g, '_')}`;
+
+            // Check if this item has an associated action
+            const actionInfo = findActionForItem(itemHrid);
+
+            // If no action found, don't show button
+            if (!actionInfo) {
+                return;
+            }
+
+            // Create the action button
+            const actionButton = document.createElement('button');
+            actionButton.className = 'mwi-view-action-button';
+            actionButton.textContent = 'View Action';
+            actionButton.style.cssText = `
+            background: #2a2a2a;
+            color: #ffffff;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-left: 12px;
+            transition: all 0.2s;
+        `;
+
+            // Add hover effect
+            actionButton.addEventListener('mouseenter', () => {
+                actionButton.style.background = '#3a3a3a';
+                actionButton.style.borderColor = '#666';
+            });
+            actionButton.addEventListener('mouseleave', () => {
+                actionButton.style.background = '#2a2a2a';
+                actionButton.style.borderColor = '#555';
+            });
+
+            // Add click handler
+            actionButton.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+
+                // Find the Item Dictionary modal specifically before navigating
+                const dictionaryTitle = document.querySelector('[class*="ItemDictionary_title"]');
+                let dictionaryCloseButton = null;
+
+                if (dictionaryTitle) {
+                    // Navigate up to find the Modal_modal container
+                    const modal = dictionaryTitle.closest('[class*="Modal_modal"]');
+                    if (modal) {
+                        dictionaryCloseButton = modal.querySelector('[class*="Modal_closeButton"]');
+                    }
+                }
+
+                // Navigate to the action first
+                navigateToItem(itemHrid);
+
+                // Close the dictionary modal after a short delay
+                setTimeout(() => {
+                    if (dictionaryCloseButton) {
+                        dictionaryCloseButton.click();
+                    } else {
+                        // Fallback: try Escape key
+                        const escEvent = new KeyboardEvent('keydown', {
+                            key: 'Escape',
+                            code: 'Escape',
+                            keyCode: 27,
+                            which: 27,
+                            bubbles: true,
+                            cancelable: true,
+                        });
+                        document.dispatchEvent(escEvent);
+                    }
+                }, 150);
+            });
+
+            // Insert button after the title
+            titleElem.parentNode.insertBefore(actionButton, titleElem.nextSibling);
+
+            // Adjust title parent to be flexbox
+            const parent = titleElem.parentNode;
+            if (parent && !parent.style.display) {
+                parent.style.cssText = `
+                display: flex;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
+            `;
+            }
+        }
+
+        /**
+         * Disable the feature and clean up
+         */
+        disable() {
+            clearTimeout(this.injectTimeout);
+            this.timerRegistry.clearAll();
+
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+
+            // Remove all injected buttons
+            document.querySelectorAll('.mwi-view-action-button').forEach((elem) => elem.remove());
+            document.querySelectorAll('.mwi-view-action-popup-button').forEach((elem) => elem.remove());
+
+            this.isInitialized = false;
+        }
+    }
+
+    const viewActionButton = new ViewActionButton();
+
+    // Auto-initialize (always enabled feature)
+    viewActionButton.initialize();
+
+    /**
+     * Transmute History Tracker
+     * Records transmute sessions via WebSocket and persists to IndexedDB.
+     *
+     * Session lifecycle:
+     * - Start: actions_updated with actionHrid === '/actions/alchemy/transmute'
+     * - Result: action_completed with same actionHrid
+     * - End: actions_updated with no transmute action, or different input item
+     *
+     * Result detection:
+     * - Success: endCharacterItems contains an item listed in the input item's transmuteDropTable
+     * - Failure: no items from the transmuteDropTable appear in endCharacterItems
+     * - Incidental drops (essences on non-essence transmutes, artisan's crates) are excluded
+     *   because they are not listed in the input item's transmuteDropTable
+     */
+
+
+    const TRANSMUTE_ACTION_HRID = '/actions/alchemy/transmute';
+    const COIN_ITEM_HRID$1 = '/items/coin';
+    const STORAGE_KEY$2 = 'transmuteSessions';
+    const STORAGE_STORE$2 = 'alchemyHistory';
+
+    class TransmuteHistoryTracker {
+        constructor() {
+            this.isInitialized = false;
+            this.characterId = null;
+            this.activeSession = null; // Current in-progress session object
+            this.handlers = {
+                actionsUpdated: (data) => this.handleActionsUpdated(data),
+                actionCompleted: (data) => this.handleActionCompleted(data),
+                initCharacterData: () => this.handleReconnect(),
+                characterSwitched: (data) => this.handleCharacterSwitched(data),
+            };
+        }
+
+        getStorageKey() {
+            return this.characterId ? `${STORAGE_KEY$2}_${this.characterId}` : STORAGE_KEY$2;
+        }
+
+        /**
+         * Initialize the tracker
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('alchemy_transmuteHistory')) {
+                return;
+            }
+
+            this.isInitialized = true;
+            this.characterId = dataManager.getCurrentCharacterId();
+
+            webSocketHook.on('actions_updated', this.handlers.actionsUpdated);
+            webSocketHook.on('action_completed', this.handlers.actionCompleted);
+            webSocketHook.on('init_character_data', this.handlers.initCharacterData);
+            dataManager.on('character_switched', this.handlers.characterSwitched);
+        }
+
+        /**
+         * Disable the tracker
+         */
+        disable() {
+            webSocketHook.off('actions_updated', this.handlers.actionsUpdated);
+            webSocketHook.off('action_completed', this.handlers.actionCompleted);
+            webSocketHook.off('init_character_data', this.handlers.initCharacterData);
+            dataManager.off('character_switched', this.handlers.characterSwitched);
+
+            if (this.activeSession) {
+                this.endSession();
+            }
+
+            this.isInitialized = false;
+            this.characterId = null;
+        }
+
+        /**
+         * Handle actions_updated — detect session start or end
+         * @param {Object} data - WebSocket message data
+         */
+        async handleActionsUpdated(data) {
+            const actions = data.endCharacterActions || [];
+            const transmuteAction = actions.find((a) => a.actionHrid === TRANSMUTE_ACTION_HRID);
+
+            if (transmuteAction) {
+                const inputItemHrid = this.extractItemHrid(transmuteAction.primaryItemHash);
+                if (!inputItemHrid) {
+                    return;
+                }
+
+                if (!this.activeSession) {
+                    // No active session — start one
+                    await this.startSession(inputItemHrid, Date.now());
+                } else if (this.activeSession.inputItemHrid !== inputItemHrid) {
+                    // Different item — end current session and start new one
+                    await this.endSession();
+                    await this.startSession(inputItemHrid, Date.now());
+                }
+                // Same item and active session — nothing to do (player restarted same action)
+            } else if (this.activeSession) {
+                // No transmute action in the update — end any active session
+                await this.endSession();
+            }
+        }
+
+        /**
+         * Handle action_completed — record one attempt result
+         * @param {Object} data - WebSocket message data
+         */
+        async handleActionCompleted(data) {
+            const action = data.endCharacterAction;
+            if (!action || action.actionHrid !== TRANSMUTE_ACTION_HRID) {
+                return;
+            }
+
+            const inputItemHrid = this.extractItemHrid(action.primaryItemHash);
+            if (!inputItemHrid) {
+                return;
+            }
+
+            // Ensure we have an active session for this item
+            if (!this.activeSession || this.activeSession.inputItemHrid !== inputItemHrid) {
+                await this.startSession(inputItemHrid, Date.now());
+            }
+
+            // bulkMultiplier defines how many items are consumed and returned per action
+            const itemDetailsForBulk = dataManager.getItemDetails(inputItemHrid);
+            if (!itemDetailsForBulk?.alchemyDetail?.bulkMultiplier) {
+                console.error(`[TransmuteHistoryTracker] Item has no alchemyDetail.bulkMultiplier: ${inputItemHrid}`);
+            }
+            const bulkMultiplier = itemDetailsForBulk?.alchemyDetail?.bulkMultiplier ?? 1;
+
+            // Build a Set of valid output HRIDs from the input item's transmute drop table.
+            // This filters out incidental drops (essences, artisan's crates) that arrive even on failure,
+            // while correctly preserving essence outputs when transmuting essence → essence.
+            const dropTable = itemDetailsForBulk?.alchemyDetail?.transmuteDropTable || [];
+            const validOutputHrids = new Set(dropTable.map((entry) => entry.itemHrid));
+
+            // Exclude coins and items not in the drop table (incidental drops)
+            const nonCoinItems = (data.endCharacterItems || []).filter(
+                (item) => item.itemHrid !== COIN_ITEM_HRID$1 && validOutputHrids.has(item.itemHrid)
+            );
+
+            // The game always sends one entry for the consumed input item.
+            // If the input is also returned (self-return), it sends additional entries.
+            // Only the extra entries (beyond the first consumed one) represent actual returns.
+            const inputItemEntries = nonCoinItems.filter((item) => item.itemHrid === inputItemHrid);
+            const inputReturned = inputItemEntries.length > 1;
+            const selfReturnEntries = inputReturned ? inputItemEntries.slice(1) : [];
+
+            // Other non-input outputs
+            const otherOutputs = nonCoinItems.filter((item) => item.itemHrid !== inputItemHrid);
+
+            // Collect all output items — the game sends one entry per action per output item,
+            // so entry count correctly represents number of actions for that output.
+            const outputItems = [...selfReturnEntries, ...otherOutputs];
+
+            // Each entry corresponds to one successful action; failures produce no output.
+            // Use the output count as the attempt count so efficiency procs are recorded accurately.
+            // Fall back to 1 for a plain failure.
+            this.activeSession.totalAttempts += Math.max(outputItems.length, 1);
+
+            if (outputItems.length > 0) {
+                this.activeSession.totalSuccesses += outputItems.length;
+
+                for (const outputItem of outputItems) {
+                    const outputItemHrid = outputItem.itemHrid;
+                    const isOutputSelfReturn = outputItemHrid === inputItemHrid;
+
+                    if (!this.activeSession.results[outputItemHrid]) {
+                        this.activeSession.results[outputItemHrid] = {
+                            count: 0,
+                            totalValue: 0,
+                            priceEach: 0,
+                            isSelfReturn: isOutputSelfReturn,
+                        };
+                    }
+
+                    // Each entry represents bulkMultiplier items received
+                    this.activeSession.results[outputItemHrid].count += bulkMultiplier;
+
+                    // Record market price at time of result
+                    if (!isOutputSelfReturn) {
+                        const price = marketData_js.getItemPrice(outputItemHrid, { context: 'profit', side: 'sell' }) || 0;
+                        this.activeSession.results[outputItemHrid].priceEach = price;
+                        this.activeSession.results[outputItemHrid].totalValue += price * bulkMultiplier;
+                    }
+                }
+            }
+            // Failure — totalAttempts already incremented, nothing more to record
+
+            await this.saveActiveSession();
+        }
+
+        /**
+         * Handle reconnect — finalize any open session
+         */
+        async handleReconnect() {
+            if (this.activeSession) {
+                await this.endSession();
+            }
+        }
+
+        /**
+         * Handle character switch — update character ID and clear active session
+         * @param {Object} data - { newId, newName }
+         */
+        async handleCharacterSwitched(data) {
+            if (this.activeSession) {
+                await this.endSession();
+            }
+            this.characterId = data.newId || null;
+        }
+
+        /**
+         * Start a new session
+         * @param {string} inputItemHrid - Input item HRID
+         * @param {number} timestamp - Start timestamp in ms
+         */
+        async startSession(inputItemHrid, timestamp) {
+            this.activeSession = {
+                id: `transmute_${timestamp}`,
+                startTime: timestamp,
+                inputItemHrid,
+                totalAttempts: 0,
+                totalSuccesses: 0,
+                results: {},
+            };
+
+            await this.saveActiveSession();
+        }
+
+        /**
+         * End the active session
+         */
+        async endSession() {
+            if (!this.activeSession) {
+                return;
+            }
+
+            await this.saveActiveSession();
+            this.activeSession = null;
+        }
+
+        /**
+         * Save the active session to storage (upsert by id)
+         */
+        async saveActiveSession() {
+            if (!this.activeSession) {
+                return;
+            }
+
+            try {
+                const sessions = await this.loadSessions();
+                const index = sessions.findIndex((s) => s.id === this.activeSession.id);
+
+                if (index !== -1) {
+                    sessions[index] = this.activeSession;
+                } else {
+                    sessions.push(this.activeSession);
+                }
+
+                await storage.setJSON(this.getStorageKey(), sessions, STORAGE_STORE$2, true);
+            } catch (error) {
+                console.error('[TransmuteHistoryTracker] Failed to save session:', error);
+            }
+        }
+
+        /**
+         * Load all sessions from storage
+         * @returns {Array} Array of session objects
+         */
+        async loadSessions() {
+            try {
+                return await storage.getJSON(this.getStorageKey(), STORAGE_STORE$2, []);
+            } catch (error) {
+                console.error('[TransmuteHistoryTracker] Failed to load sessions:', error);
+                return [];
+            }
+        }
+
+        /**
+         * Clear all history from storage
+         */
+        async clearHistory() {
+            try {
+                this.activeSession = null;
+                await storage.setJSON(this.getStorageKey(), [], STORAGE_STORE$2, true);
+            } catch (error) {
+                console.error('[TransmuteHistoryTracker] Failed to clear history:', error);
+            }
+        }
+
+        /**
+         * Persist a caller-supplied sessions array (used by viewer for single-row delete)
+         * @param {Array} sessions - Updated sessions array to persist
+         */
+        async deleteSessions(sessions) {
+            try {
+                await storage.setJSON(this.getStorageKey(), sessions, STORAGE_STORE$2, true);
+            } catch (error) {
+                console.error('[TransmuteHistoryTracker] Failed to save sessions after delete:', error);
+            }
+        }
+
+        /**
+         * Extract item HRID from a primaryItemHash string
+         * Format: "characterId::/item_locations/inventory::/items/item_name::0"
+         * @param {string} hash - Primary item hash
+         * @returns {string|null} Item HRID or null
+         */
+        extractItemHrid(hash) {
+            if (!hash) {
+                return null;
+            }
+
+            const parts = hash.split('::');
+            if (parts.length < 3) {
+                return null;
+            }
+
+            const hrid = parts[2];
+            return hrid.startsWith('/items/') ? hrid : null;
+        }
+
+        /**
+         * Get the item name from HRID via dataManager
+         * @param {string} itemHrid - Item HRID
+         * @returns {string} Item display name
+         */
+        getItemName(itemHrid) {
+            const details = dataManager.getItemDetails(itemHrid);
+            return details?.name || itemHrid.split('/').pop().replace(/_/g, ' ');
+        }
+    }
+
+    const transmuteHistoryTracker = new TransmuteHistoryTracker();
+
+    var transmuteHistoryTracker$1 = {
+        name: 'Transmute History Tracker',
+        initialize: () => transmuteHistoryTracker.initialize(),
+        cleanup: () => transmuteHistoryTracker.disable(),
+    };
+
+    /**
+     * Transmute History Viewer
+     * Modal UI for browsing transmute session history.
+     * Injected as a tab in the alchemy panel tab bar.
+     */
+
+
+    class TransmuteHistoryViewer {
+        constructor() {
+            this.isInitialized = false;
+            this.modal = null;
+            this.sessions = [];
+            this.filteredSessions = [];
+            this.currentPage = 1;
+            this.rowsPerPage = 50;
+            this.showAll = false;
+            this.sortColumn = 'startTime';
+            this.sortDirection = 'desc';
+
+            // Column filters
+            this.filters = {
+                dateFrom: null,
+                dateTo: null,
+                selectedInputItems: [], // Array of itemHrids
+                resultsSearch: '', // Text search for result item names
+            };
+
+            this.activeFilterPopup = null;
+            this.activeFilterButton = null;
+            this.popupCloseHandler = null;
+
+            // Tab injection
+            this.alchemyTab = null;
+            this.tabWatcher = null;
+
+            // Caches
+            this.itemNameCache = new Map();
+            this.itemsSpriteUrl = null;
+            this.cachedDateRange = null;
+
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize the viewer
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('alchemy_transmuteHistory')) {
+                return;
+            }
+
+            this.isInitialized = true;
+            this.addAlchemyTab();
+        }
+
+        /**
+         * Disable the viewer
+         */
+        disable() {
+            if (this.tabWatcher) {
+                this.tabWatcher();
+                this.tabWatcher = null;
+            }
+            if (this.alchemyTab && this.alchemyTab.parentNode) {
+                this.alchemyTab.remove();
+                this.alchemyTab = null;
+            }
+            if (this.modal) {
+                this.modal.remove();
+                this.modal = null;
+            }
+            this.timerRegistry.clearAll();
+            this.isInitialized = false;
+        }
+
+        // ─── Tab Injection ───────────────────────────────────────────────────────
+
+        /**
+         * Inject "Transmute History" tab into the alchemy tab bar.
+         * The alchemy tab bar contains Coinify, Decompose, Transmute, Unrefine, Current Action.
+         * We identify it by the presence of a "Transmute" tab text.
+         */
+        addAlchemyTab() {
+            const ensureTabExists = () => {
+                const tablist = document.querySelector('[role="tablist"]');
+                if (!tablist) return;
+
+                // Verify this is the alchemy tablist by checking for "Transmute" tab
+                const hasTransmute = Array.from(tablist.children).some(
+                    (btn) => btn.textContent.includes('Transmute') && !btn.dataset.mwiTransmuteHistoryTab
+                );
+                if (!hasTransmute) return;
+
+                // Already injected?
+                if (tablist.querySelector('[data-mwi-transmute-history-tab="true"]')) return;
+
+                // Clone an existing tab for structure
+                const referenceTab = Array.from(tablist.children).find(
+                    (btn) => btn.textContent.includes('Transmute') && !btn.dataset.mwiTransmuteHistoryTab
+                );
+                if (!referenceTab) return;
+
+                const tab = referenceTab.cloneNode(true);
+                tab.setAttribute('data-mwi-transmute-history-tab', 'true');
+                tab.classList.remove('Mui-selected');
+                tab.setAttribute('aria-selected', 'false');
+                tab.setAttribute('tabindex', '-1');
+
+                // Set label
+                const badge = tab.querySelector('.TabsComponent_badge__1Du26');
+                if (badge) {
+                    // Replace first text node (the label) while keeping badge span
+                    const badgeSpan = badge.querySelector('.MuiBadge-badge');
+                    badge.textContent = '';
+                    badge.appendChild(document.createTextNode('Transmute History'));
+                    if (badgeSpan) badge.appendChild(badgeSpan);
+                } else {
+                    tab.textContent = 'Transmute History';
+                }
+
+                tab.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.openModal();
+                });
+
+                tablist.appendChild(tab);
+                this.alchemyTab = tab;
+            };
+
+            // Watch for DOM changes that recreate the tablist
+            if (!this.tabWatcher) {
+                this.tabWatcher = domObserverHelpers_js.createMutationWatcher(
+                    document.body,
+                    () => {
+                        // If our tab was removed from DOM, clear reference
+                        if (this.alchemyTab && !document.body.contains(this.alchemyTab)) {
+                            this.alchemyTab = null;
+                        }
+                        ensureTabExists();
+                    },
+                    { childList: true, subtree: true }
+                );
+            }
+
+            ensureTabExists();
+        }
+
+        // ─── Modal ───────────────────────────────────────────────────────────────
+
+        /**
+         * Open the modal — load sessions and render
+         */
+        async openModal() {
+            this.sessions = await transmuteHistoryTracker.loadSessions();
+            this.cachedDateRange = null;
+            this.applyFilters();
+
+            if (!this.modal) {
+                this.createModal();
+            }
+
+            this.modal.style.display = 'flex';
+            this.renderTable();
+        }
+
+        /**
+         * Close the modal
+         */
+        closeModal() {
+            if (this.modal) {
+                this.modal.style.display = 'none';
+            }
+            this.closeActiveFilterPopup();
+        }
+
+        /**
+         * Create modal DOM structure
+         */
+        createModal() {
+            this.modal = document.createElement('div');
+            this.modal.className = 'mwi-transmute-history-modal';
+            this.modal.style.cssText = `
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+        `;
+
+            const content = document.createElement('div');
+            content.className = 'mwi-transmute-history-content';
+            content.style.cssText = `
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 20px;
+            width: fit-content;
+            min-width: 500px;
+            max-width: 95vw;
+            max-height: 90%;
+            overflow: auto;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        `;
+
+            // Header
+            const header = document.createElement('div');
+            header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        `;
+
+            const title = document.createElement('h2');
+            title.textContent = 'Transmute History';
+            title.style.cssText = 'margin: 0; color: #fff;';
+
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = '✕';
+            closeBtn.style.cssText = `
+            background: none; border: none; color: #fff;
+            font-size: 24px; cursor: pointer; padding: 0;
+            width: 30px; height: 30px;
+        `;
+            closeBtn.addEventListener('click', () => this.closeModal());
+
+            header.appendChild(title);
+            header.appendChild(closeBtn);
+
+            // Controls
+            const controls = document.createElement('div');
+            controls.className = 'mwi-transmute-history-controls';
+            controls.style.cssText = `
+            display: flex;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+        `;
+
+            // Active filter badges row
+            const badges = document.createElement('div');
+            badges.className = 'mwi-transmute-history-badges';
+            badges.style.cssText = `
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+            min-height: 28px;
+            margin-bottom: 10px;
+        `;
+
+            // Table container
+            const tableContainer = document.createElement('div');
+            tableContainer.className = 'mwi-transmute-history-table-container';
+            tableContainer.style.cssText = 'overflow-x: auto;';
+
+            // Pagination
+            const pagination = document.createElement('div');
+            pagination.className = 'mwi-transmute-history-pagination';
+            pagination.style.cssText = `
+            margin-top: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        `;
+
+            content.appendChild(header);
+            content.appendChild(controls);
+            content.appendChild(badges);
+            content.appendChild(tableContainer);
+            content.appendChild(pagination);
+            this.modal.appendChild(content);
+            document.body.appendChild(this.modal);
+
+            // Close on backdrop click
+            this.modal.addEventListener('click', (e) => {
+                if (e.target === this.modal) this.closeModal();
+            });
+        }
+
+        // ─── Filtering ───────────────────────────────────────────────────────────
+
+        /**
+         * Apply all active filters to this.sessions → this.filteredSessions
+         */
+        applyFilters() {
+            this.cachedDateRange = null;
+
+            const hasDateFilter = !!(this.filters.dateFrom || this.filters.dateTo);
+            let dateToEndOfDay = null;
+            if (hasDateFilter && this.filters.dateTo) {
+                dateToEndOfDay = new Date(this.filters.dateTo);
+                dateToEndOfDay.setHours(23, 59, 59, 999);
+            }
+
+            const hasItemFilter = this.filters.selectedInputItems.length > 0;
+            const itemFilterSet = hasItemFilter ? new Set(this.filters.selectedInputItems) : null;
+
+            const hasResultsFilter = !!this.filters.resultsSearch.trim();
+            const resultsSearch = hasResultsFilter ? this.filters.resultsSearch.trim().toLowerCase() : '';
+
+            const filtered = this.sessions.filter((session) => {
+                // Date filter
+                if (hasDateFilter) {
+                    const d = new Date(session.startTime);
+                    if (this.filters.dateFrom && d < this.filters.dateFrom) return false;
+                    if (dateToEndOfDay && d > dateToEndOfDay) return false;
+                }
+
+                // Input item filter
+                if (hasItemFilter && !itemFilterSet.has(session.inputItemHrid)) return false;
+
+                // Results text search
+                if (hasResultsFilter) {
+                    const resultNames = Object.keys(session.results || {}).map((hrid) =>
+                        this.getItemName(hrid).toLowerCase()
+                    );
+                    if (!resultNames.some((name) => name.includes(resultsSearch))) return false;
+                }
+
+                return true;
+            });
+
+            // Sort
+            filtered.sort((a, b) => {
+                const aVal = a[this.sortColumn] ?? 0;
+                const bVal = b[this.sortColumn] ?? 0;
+                return this.sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+            });
+
+            this.filteredSessions = filtered;
+            this.currentPage = 1;
+        }
+
+        /**
+         * Check if a column has an active filter
+         * @param {string} col
+         * @returns {boolean}
+         */
+        hasActiveFilter(col) {
+            switch (col) {
+                case 'startTime':
+                    return !!(this.filters.dateFrom || this.filters.dateTo);
+                case 'inputItemHrid':
+                    return this.filters.selectedInputItems.length > 0;
+                case 'results':
+                    return !!this.filters.resultsSearch.trim();
+                default:
+                    return false;
+            }
+        }
+
+        /**
+         * Returns true if any filter is active
+         */
+        hasAnyFilter() {
+            return (
+                this.hasActiveFilter('startTime') ||
+                this.hasActiveFilter('inputItemHrid') ||
+                this.hasActiveFilter('results')
+            );
+        }
+
+        /**
+         * Clear all filters
+         */
+        clearAllFilters() {
+            this.filters.dateFrom = null;
+            this.filters.dateTo = null;
+            this.filters.selectedInputItems = [];
+            this.filters.resultsSearch = '';
+            this.applyFilters();
+            this.renderTable();
+        }
+
+        // ─── Rendering ───────────────────────────────────────────────────────────
+
+        /**
+         * Full render: controls + badges + table + pagination
+         */
+        renderTable() {
+            this.renderControls();
+            this.renderBadges();
+
+            const tableContainer = this.modal.querySelector('.mwi-transmute-history-table-container');
+            while (tableContainer.firstChild) tableContainer.removeChild(tableContainer.firstChild);
+
+            const table = document.createElement('table');
+            table.style.cssText = 'width: max-content; border-collapse: collapse; color: #fff; white-space: nowrap;';
+
+            // Header
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            headerRow.style.background = '#1a1a1a';
+
+            const columns = [
+                { key: 'startTime', label: 'Session Start', filterable: true },
+                { key: 'inputItemHrid', label: 'Input Item', filterable: true },
+                { key: 'totalAttempts', label: 'Attempts', filterable: false },
+                { key: 'totalSuccesses', label: 'Successes', filterable: false },
+                { key: 'results', label: 'Results', filterable: true },
+                { key: '_delete', label: '', filterable: false },
+            ];
+
+            columns.forEach((col) => {
+                const th = document.createElement('th');
+                th.style.cssText = `
+                padding: 10px;
+                text-align: left;
+                border-bottom: 2px solid #555;
+                user-select: none;
+                white-space: nowrap;
+            `;
+
+                const headerContent = document.createElement('div');
+                headerContent.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+                const labelSpan = document.createElement('span');
+                labelSpan.style.cursor = 'pointer';
+
+                const isSortable = col.key !== 'results';
+                if (isSortable) {
+                    if (this.sortColumn === col.key) {
+                        labelSpan.textContent = col.label + (this.sortDirection === 'asc' ? ' ▲' : ' ▼');
+                    } else {
+                        labelSpan.textContent = col.label;
+                    }
+                    labelSpan.addEventListener('click', () => {
+                        if (this.sortColumn === col.key) {
+                            this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+                        } else {
+                            this.sortColumn = col.key;
+                            this.sortDirection = 'desc';
+                        }
+                        this.applyFilters();
+                        this.renderTable();
+                    });
+                } else {
+                    labelSpan.textContent = col.label;
+                    labelSpan.style.cursor = 'default';
+                }
+
+                headerContent.appendChild(labelSpan);
+
+                if (col.filterable) {
+                    const filterBtn = document.createElement('button');
+                    filterBtn.textContent = '⋮';
+                    filterBtn.style.cssText = `
+                    background: none; border: none;
+                    color: ${this.hasActiveFilter(col.key) ? '#4a90e2' : '#aaa'};
+                    cursor: pointer; font-size: 16px;
+                    padding: 2px 4px; font-weight: bold;
+                `;
+                    filterBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.showFilterPopup(col.key, filterBtn);
+                    });
+                    headerContent.appendChild(filterBtn);
+                }
+
+                th.appendChild(headerContent);
+                headerRow.appendChild(th);
+            });
+
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+
+            // Body
+            const tbody = document.createElement('tbody');
+            const paginated = this.getPaginatedSessions();
+
+            if (paginated.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.colSpan = columns.length;
+                cell.textContent =
+                    this.sessions.length === 0
+                        ? 'No transmute history recorded yet.'
+                        : 'No sessions match the current filters.';
+                cell.style.cssText = 'padding: 20px; text-align: center; color: #888;';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+            } else {
+                paginated.forEach((session, index) => {
+                    const row = document.createElement('tr');
+                    row.style.cssText = `
+                    border-bottom: 1px solid #333;
+                    background: ${index % 2 === 0 ? '#2a2a2a' : '#252525'};
+                `;
+
+                    // Session Start
+                    const dateCell = document.createElement('td');
+                    dateCell.textContent = new Date(session.startTime).toLocaleString();
+                    dateCell.style.padding = '6px 10px';
+                    row.appendChild(dateCell);
+
+                    // Input Item
+                    const inputCell = document.createElement('td');
+                    inputCell.style.cssText = 'padding: 6px 10px; display: flex; align-items: center; gap: 8px;';
+                    this.appendItemIcon(inputCell, session.inputItemHrid, 20);
+                    const inputName = document.createElement('span');
+                    inputName.textContent = this.getItemName(session.inputItemHrid);
+                    inputCell.appendChild(inputName);
+                    row.appendChild(inputCell);
+
+                    // Attempts
+                    const attemptsCell = document.createElement('td');
+                    attemptsCell.textContent = session.totalAttempts;
+                    attemptsCell.style.padding = '6px 10px';
+                    row.appendChild(attemptsCell);
+
+                    // Successes
+                    const successCell = document.createElement('td');
+                    const failures = session.totalAttempts - session.totalSuccesses;
+                    successCell.textContent = `${session.totalSuccesses} (${failures} failed)`;
+                    successCell.style.cssText = `
+                    padding: 6px 10px;
+                    color: ${failures > 0 ? '#fbbf24' : '#4ade80'};
+                `;
+                    row.appendChild(successCell);
+
+                    // Results
+                    const resultsCell = document.createElement('td');
+                    resultsCell.style.cssText = 'padding: 6px 10px;';
+                    this.renderResultsCell(resultsCell, session);
+                    row.appendChild(resultsCell);
+
+                    // Delete
+                    const deleteCell = document.createElement('td');
+                    deleteCell.style.cssText = 'padding: 6px 4px; text-align: center;';
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.textContent = '✕';
+                    deleteBtn.title = 'Delete this session';
+                    deleteBtn.style.cssText = `
+                    background: none; border: none; color: #dc2626;
+                    cursor: pointer; font-size: 14px; padding: 2px 6px;
+                    border-radius: 3px; line-height: 1;
+                `;
+                    deleteBtn.addEventListener('mouseenter', () => {
+                        deleteBtn.style.background = 'rgba(220,38,38,0.15)';
+                    });
+                    deleteBtn.addEventListener('mouseleave', () => {
+                        deleteBtn.style.background = 'none';
+                    });
+                    deleteBtn.addEventListener('click', () => this.deleteSession(session.id));
+                    deleteCell.appendChild(deleteBtn);
+                    row.appendChild(deleteCell);
+
+                    tbody.appendChild(row);
+                });
+            }
+
+            table.appendChild(tbody);
+            tableContainer.appendChild(table);
+            this.renderPagination();
+        }
+
+        /**
+         * Render the results cell for a session
+         * Results sorted by totalValue desc, self-returns last
+         * @param {HTMLElement} cell
+         * @param {Object} session
+         */
+        renderResultsCell(cell, session) {
+            const results = session.results || {};
+            const entries = Object.entries(results);
+
+            if (entries.length === 0) {
+                const span = document.createElement('span');
+                span.textContent = '—';
+                span.style.color = '#888';
+                cell.appendChild(span);
+                return;
+            }
+
+            // Sort: non-self-returns by totalValue desc, self-returns last
+            // Exclude incidental drops (essences, artisan's crates) recorded in older sessions
+            const filteredEntries = entries.sort(([, a], [, b]) => {
+                if (a.isSelfReturn && !b.isSelfReturn) return 1;
+                if (!a.isSelfReturn && b.isSelfReturn) return -1;
+                return (b.totalValue || 0) - (a.totalValue || 0);
+            });
+
+            filteredEntries.forEach(([itemHrid, result]) => {
+                const line = document.createElement('div');
+                line.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 2px;';
+
+                this.appendItemIcon(line, itemHrid, 16);
+
+                const text = document.createElement('span');
+                const name = this.getItemName(itemHrid);
+
+                if (result.isSelfReturn) {
+                    text.textContent = `${name} x${result.count} (self-return)`;
+                    text.style.color = '#888';
+                } else {
+                    const total = formatters_js.formatKMB(result.totalValue || 0, 1);
+                    const each = formatters_js.formatKMB(result.priceEach || 0, 1);
+                    text.textContent = `${name} x${result.count} = ${total} (${each} each)`;
+                }
+
+                line.appendChild(text);
+                cell.appendChild(line);
+            });
+        }
+
+        /**
+         * Render controls bar (stats + clear history button)
+         */
+        renderControls() {
+            const controls = this.modal.querySelector('.mwi-transmute-history-controls');
+            while (controls.firstChild) controls.removeChild(controls.firstChild);
+
+            // Stats
+            const stats = document.createElement('span');
+            stats.style.cssText = 'color: #aaa; font-size: 14px;';
+            stats.textContent = `${this.filteredSessions.length} session${this.filteredSessions.length !== 1 ? 's' : ''}`;
+            controls.appendChild(stats);
+
+            const rightGroup = document.createElement('div');
+            rightGroup.style.cssText = 'display: flex; gap: 8px; align-items: center;';
+
+            // Clear All Filters button (only when filters active)
+            if (this.hasAnyFilter()) {
+                const clearFiltersBtn = document.createElement('button');
+                clearFiltersBtn.textContent = 'Clear All Filters';
+                clearFiltersBtn.style.cssText = `
+                padding: 6px 12px; background: #e67e22; color: white;
+                border: none; border-radius: 4px; cursor: pointer;
+            `;
+                clearFiltersBtn.addEventListener('click', () => this.clearAllFilters());
+                rightGroup.appendChild(clearFiltersBtn);
+            }
+
+            // Export button
+            const exportBtn = document.createElement('button');
+            exportBtn.textContent = 'Export';
+            exportBtn.style.cssText = `
+            padding: 6px 12px; background: #2563eb; color: white;
+            border: none; border-radius: 4px; cursor: pointer;
+        `;
+            exportBtn.addEventListener('click', () => this.exportHistory());
+            rightGroup.appendChild(exportBtn);
+
+            // Clear History button
+            const clearBtn = document.createElement('button');
+            clearBtn.textContent = 'Clear History';
+            clearBtn.style.cssText = `
+            padding: 6px 12px; background: #dc2626; color: white;
+            border: none; border-radius: 4px; cursor: pointer;
+        `;
+            clearBtn.addEventListener('click', () => this.clearHistory());
+            rightGroup.appendChild(clearBtn);
+
+            controls.appendChild(rightGroup);
+        }
+
+        /**
+         * Render active filter badges
+         */
+        renderBadges() {
+            const container = this.modal.querySelector('.mwi-transmute-history-badges');
+            while (container.firstChild) container.removeChild(container.firstChild);
+
+            const badges = [];
+
+            if (this.filters.dateFrom || this.filters.dateTo) {
+                const parts = [];
+                if (this.filters.dateFrom) parts.push(this.filters.dateFrom.toLocaleDateString());
+                if (this.filters.dateTo) parts.push(this.filters.dateTo.toLocaleDateString());
+                badges.push({
+                    label: `Date: ${parts.join(' - ')}`,
+                    onRemove: () => {
+                        this.filters.dateFrom = null;
+                        this.filters.dateTo = null;
+                        this.applyFilters();
+                        this.renderTable();
+                    },
+                });
+            }
+
+            if (this.filters.selectedInputItems.length > 0) {
+                const label =
+                    this.filters.selectedInputItems.length === 1
+                        ? this.getItemName(this.filters.selectedInputItems[0])
+                        : `${this.filters.selectedInputItems.length} input items`;
+                badges.push({
+                    label: `Input: ${label}`,
+                    icon: this.filters.selectedInputItems[0],
+                    onRemove: () => {
+                        this.filters.selectedInputItems = [];
+                        this.applyFilters();
+                        this.renderTable();
+                    },
+                });
+            }
+
+            if (this.filters.resultsSearch.trim()) {
+                badges.push({
+                    label: `Results: "${this.filters.resultsSearch.trim()}"`,
+                    onRemove: () => {
+                        this.filters.resultsSearch = '';
+                        this.applyFilters();
+                        this.renderTable();
+                    },
+                });
+            }
+
+            badges.forEach((badge) => {
+                const el = document.createElement('div');
+                el.style.cssText = `
+                display: flex; align-items: center; gap: 6px;
+                padding: 4px 8px; background: #3a3a3a;
+                border: 1px solid #555; border-radius: 4px;
+                color: #aaa; font-size: 13px;
+            `;
+
+                if (badge.icon) {
+                    this.appendItemIcon(el, badge.icon, 14);
+                }
+
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = badge.label;
+                el.appendChild(labelSpan);
+
+                const removeBtn = document.createElement('button');
+                removeBtn.textContent = '✕';
+                removeBtn.style.cssText = `
+                background: none; border: none; color: #aaa;
+                cursor: pointer; padding: 0; font-size: 13px; line-height: 1;
+            `;
+                removeBtn.addEventListener('click', badge.onRemove);
+                el.appendChild(removeBtn);
+
+                container.appendChild(el);
+            });
+        }
+
+        /**
+         * Render pagination controls
+         */
+        renderPagination() {
+            const pagination = this.modal.querySelector('.mwi-transmute-history-pagination');
+            while (pagination.firstChild) pagination.removeChild(pagination.firstChild);
+
+            const leftSide = document.createElement('div');
+            leftSide.style.cssText = 'display: flex; gap: 8px; align-items: center; color: #aaa;';
+
+            const label = document.createElement('span');
+            label.textContent = 'Rows per page:';
+
+            const rowsInput = document.createElement('input');
+            rowsInput.type = 'number';
+            rowsInput.value = this.rowsPerPage;
+            rowsInput.min = '1';
+            rowsInput.disabled = this.showAll;
+            rowsInput.style.cssText = `
+            width: 60px; padding: 4px 8px;
+            border: 1px solid #555; border-radius: 4px;
+            background: ${this.showAll ? '#333' : '#1a1a1a'};
+            color: ${this.showAll ? '#666' : '#fff'};
+        `;
+            rowsInput.addEventListener('change', (e) => {
+                this.rowsPerPage = Math.max(1, parseInt(e.target.value) || 50);
+                this.currentPage = 1;
+                this.renderTable();
+            });
+
+            const showAllLabel = document.createElement('label');
+            showAllLabel.style.cssText = 'cursor: pointer; color: #aaa; display: flex; align-items: center; gap: 4px;';
+
+            const showAllCheckbox = document.createElement('input');
+            showAllCheckbox.type = 'checkbox';
+            showAllCheckbox.checked = this.showAll;
+            showAllCheckbox.style.cursor = 'pointer';
+            showAllCheckbox.addEventListener('change', (e) => {
+                this.showAll = e.target.checked;
+                rowsInput.disabled = this.showAll;
+                rowsInput.style.background = this.showAll ? '#333' : '#1a1a1a';
+                rowsInput.style.color = this.showAll ? '#666' : '#fff';
+                this.currentPage = 1;
+                this.renderTable();
+            });
+
+            showAllLabel.appendChild(showAllCheckbox);
+            showAllLabel.appendChild(document.createTextNode('Show All'));
+
+            leftSide.appendChild(label);
+            leftSide.appendChild(rowsInput);
+            leftSide.appendChild(showAllLabel);
+
+            const rightSide = document.createElement('div');
+            rightSide.style.cssText = 'display: flex; gap: 8px; align-items: center; color: #aaa;';
+
+            if (!this.showAll) {
+                const totalPages = this.getTotalPages();
+
+                const prevBtn = document.createElement('button');
+                prevBtn.textContent = '◀';
+                prevBtn.disabled = this.currentPage === 1;
+                prevBtn.style.cssText = `
+                padding: 4px 12px;
+                background: ${this.currentPage === 1 ? '#333' : '#4a90e2'};
+                color: ${this.currentPage === 1 ? '#666' : 'white'};
+                border: none; border-radius: 4px;
+                cursor: ${this.currentPage === 1 ? 'default' : 'pointer'};
+            `;
+                prevBtn.addEventListener('click', () => {
+                    if (this.currentPage > 1) {
+                        this.currentPage--;
+                        this.renderTable();
+                    }
+                });
+
+                const pageInfo = document.createElement('span');
+                pageInfo.textContent = `Page ${this.currentPage} of ${totalPages || 1}`;
+
+                const nextBtn = document.createElement('button');
+                nextBtn.textContent = '▶';
+                nextBtn.disabled = this.currentPage >= totalPages;
+                nextBtn.style.cssText = `
+                padding: 4px 12px;
+                background: ${this.currentPage >= totalPages ? '#333' : '#4a90e2'};
+                color: ${this.currentPage >= totalPages ? '#666' : 'white'};
+                border: none; border-radius: 4px;
+                cursor: ${this.currentPage >= totalPages ? 'default' : 'pointer'};
+            `;
+                nextBtn.addEventListener('click', () => {
+                    if (this.currentPage < totalPages) {
+                        this.currentPage++;
+                        this.renderTable();
+                    }
+                });
+
+                rightSide.appendChild(prevBtn);
+                rightSide.appendChild(pageInfo);
+                rightSide.appendChild(nextBtn);
+            } else {
+                const info = document.createElement('span');
+                info.textContent = `Showing all ${this.filteredSessions.length} sessions`;
+                rightSide.appendChild(info);
+            }
+
+            pagination.appendChild(leftSide);
+            pagination.appendChild(rightSide);
+        }
+
+        // ─── Filter Popups ───────────────────────────────────────────────────────
+
+        /**
+         * Show the appropriate filter popup for a column
+         * @param {string} columnKey
+         * @param {HTMLElement} buttonElement
+         */
+        showFilterPopup(columnKey, buttonElement) {
+            // Toggle behavior
+            if (this.activeFilterPopup && this.activeFilterButton === buttonElement) {
+                this.closeActiveFilterPopup();
+                return;
+            }
+
+            this.closeActiveFilterPopup();
+
+            let popup;
+            switch (columnKey) {
+                case 'startTime':
+                    popup = this.createDateFilterPopup();
+                    break;
+                case 'inputItemHrid':
+                    popup = this.createInputItemFilterPopup();
+                    break;
+                case 'results':
+                    popup = this.createResultsFilterPopup();
+                    break;
+                default:
+                    return;
+            }
+
+            const rect = buttonElement.getBoundingClientRect();
+            popup.style.position = 'fixed';
+            popup.style.top = `${rect.bottom + 5}px`;
+            popup.style.left = `${rect.left}px`;
+            popup.style.zIndex = '10002';
+
+            document.body.appendChild(popup);
+            this.activeFilterPopup = popup;
+            this.activeFilterButton = buttonElement;
+
+            this.popupCloseHandler = (e) => {
+                if (e.target.type === 'date' || e.target.closest?.('input[type="date"]')) return;
+                if (!popup.contains(e.target) && e.target !== buttonElement) {
+                    this.closeActiveFilterPopup();
+                }
+            };
+            const t = setTimeout(() => document.addEventListener('click', this.popupCloseHandler), 10);
+            this.timerRegistry.registerTimeout(t);
+        }
+
+        /**
+         * Close and clean up the active filter popup
+         */
+        closeActiveFilterPopup() {
+            if (this.activeFilterPopup) {
+                this.activeFilterPopup.remove();
+                this.activeFilterPopup = null;
+            }
+            if (this.popupCloseHandler) {
+                document.removeEventListener('click', this.popupCloseHandler);
+                this.popupCloseHandler = null;
+            }
+            this.activeFilterButton = null;
+        }
+
+        /**
+         * Create date range filter popup
+         * @returns {HTMLElement}
+         */
+        createDateFilterPopup() {
+            const popup = this.createPopupBase('Filter by Date');
+
+            // Compute available range
+            if (!this.cachedDateRange) {
+                const timestamps = this.sessions.map((s) => s.startTime).filter(Boolean);
+                if (timestamps.length > 0) {
+                    this.cachedDateRange = {
+                        minDate: new Date(Math.min(...timestamps)),
+                        maxDate: new Date(Math.max(...timestamps)),
+                    };
+                } else {
+                    this.cachedDateRange = { minDate: null, maxDate: null };
+                }
+            }
+
+            const { minDate, maxDate } = this.cachedDateRange;
+
+            if (minDate && maxDate) {
+                const rangeInfo = document.createElement('div');
+                rangeInfo.style.cssText = `
+                color: #aaa; font-size: 11px; margin-bottom: 10px;
+                padding: 6px; background: #1a1a1a; border-radius: 3px;
+            `;
+                rangeInfo.textContent = `Available: ${minDate.toLocaleDateString()} - ${maxDate.toLocaleDateString()}`;
+                popup.appendChild(rangeInfo);
+            }
+
+            const fromInput = this.createDateInput(
+                'From:',
+                this.filters.dateFrom ? this.filters.dateFrom.toISOString().split('T')[0] : '',
+                minDate,
+                maxDate
+            );
+            const toInput = this.createDateInput(
+                'To:',
+                this.filters.dateTo ? this.filters.dateTo.toISOString().split('T')[0] : '',
+                minDate,
+                maxDate
+            );
+
+            popup.appendChild(fromInput.label);
+            popup.appendChild(fromInput.input);
+            popup.appendChild(toInput.label);
+            popup.appendChild(toInput.input);
+
+            const btnRow = this.createPopupButtonRow(
+                () => {
+                    this.filters.dateFrom = fromInput.input.value ? new Date(fromInput.input.value) : null;
+                    this.filters.dateTo = toInput.input.value ? new Date(toInput.input.value) : null;
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                },
+                () => {
+                    this.filters.dateFrom = null;
+                    this.filters.dateTo = null;
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                }
+            );
+            popup.appendChild(btnRow);
+
+            return popup;
+        }
+
+        /**
+         * Create input item filter popup (checkbox list with search)
+         * @returns {HTMLElement}
+         */
+        createInputItemFilterPopup() {
+            const popup = this.createPopupBase('Filter by Input Item');
+            popup.style.minWidth = '220px';
+
+            // Gather unique input items from all sessions
+            const itemSet = new Map();
+            this.sessions.forEach((s) => {
+                if (!itemSet.has(s.inputItemHrid)) {
+                    itemSet.set(s.inputItemHrid, this.getItemName(s.inputItemHrid));
+                }
+            });
+            const allItems = Array.from(itemSet.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+
+            // Track pending selection (local to this popup)
+            const pending = new Set(this.filters.selectedInputItems);
+
+            // Search box
+            const searchInput = document.createElement('input');
+            searchInput.type = 'text';
+            searchInput.placeholder = 'Search items...';
+            searchInput.style.cssText = `
+            width: 100%; padding: 6px; margin-bottom: 8px;
+            background: #1a1a1a; border: 1px solid #555;
+            border-radius: 3px; color: #fff; box-sizing: border-box;
+        `;
+
+            const listContainer = document.createElement('div');
+            listContainer.style.cssText = 'max-height: 200px; overflow-y: auto;';
+
+            const renderList = (filterText) => {
+                while (listContainer.firstChild) listContainer.removeChild(listContainer.firstChild);
+                const term = filterText.toLowerCase();
+                const visible = term ? allItems.filter(([, name]) => name.toLowerCase().includes(term)) : allItems;
+
+                visible.forEach(([hrid, name]) => {
+                    const row = document.createElement('label');
+                    row.style.cssText = `
+                    display: flex; align-items: center; gap: 8px;
+                    padding: 4px 2px; cursor: pointer; color: #ddd;
+                `;
+
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.checked = pending.has(hrid);
+                    cb.style.cursor = 'pointer';
+                    cb.addEventListener('change', () => {
+                        if (cb.checked) pending.add(hrid);
+                        else pending.delete(hrid);
+                    });
+
+                    this.appendItemIcon(row, hrid, 16);
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = name;
+
+                    row.appendChild(cb);
+                    row.appendChild(nameSpan);
+                    listContainer.appendChild(row);
+                });
+            };
+
+            searchInput.addEventListener('input', () => renderList(searchInput.value));
+            renderList('');
+
+            popup.appendChild(searchInput);
+            popup.appendChild(listContainer);
+
+            const btnRow = this.createPopupButtonRow(
+                () => {
+                    this.filters.selectedInputItems = Array.from(pending);
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                },
+                () => {
+                    this.filters.selectedInputItems = [];
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                }
+            );
+            popup.appendChild(btnRow);
+
+            return popup;
+        }
+
+        /**
+         * Create results text search popup
+         * @returns {HTMLElement}
+         */
+        createResultsFilterPopup() {
+            const popup = this.createPopupBase('Filter by Result Item');
+            popup.style.minWidth = '220px';
+
+            const searchInput = document.createElement('input');
+            searchInput.type = 'text';
+            searchInput.placeholder = 'Item name...';
+            searchInput.value = this.filters.resultsSearch;
+            searchInput.style.cssText = `
+            width: 100%; padding: 6px; margin-bottom: 10px;
+            background: #1a1a1a; border: 1px solid #555;
+            border-radius: 3px; color: #fff; box-sizing: border-box;
+        `;
+
+            popup.appendChild(searchInput);
+
+            const btnRow = this.createPopupButtonRow(
+                () => {
+                    this.filters.resultsSearch = searchInput.value;
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                },
+                () => {
+                    this.filters.resultsSearch = '';
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                }
+            );
+            popup.appendChild(btnRow);
+
+            return popup;
+        }
+
+        // ─── Popup Helpers ───────────────────────────────────────────────────────
+
+        /**
+         * Create a styled popup base div with a title
+         * @param {string} titleText
+         * @returns {HTMLElement}
+         */
+        createPopupBase(titleText) {
+            const popup = document.createElement('div');
+            popup.style.cssText = `
+            background: #2a2a2a; border: 1px solid #555;
+            border-radius: 4px; padding: 12px; min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        `;
+
+            const title = document.createElement('div');
+            title.textContent = titleText;
+            title.style.cssText = 'color: #fff; font-weight: bold; margin-bottom: 10px;';
+            popup.appendChild(title);
+
+            return popup;
+        }
+
+        /**
+         * Create a date input with label
+         * @param {string} labelText
+         * @param {string} value
+         * @param {Date|null} minDate
+         * @param {Date|null} maxDate
+         * @returns {{ label: HTMLElement, input: HTMLInputElement }}
+         */
+        createDateInput(labelText, value, minDate, maxDate) {
+            const label = document.createElement('label');
+            label.textContent = labelText;
+            label.style.cssText = 'display: block; color: #aaa; margin-bottom: 4px; font-size: 12px;';
+
+            const input = document.createElement('input');
+            input.type = 'date';
+            input.value = value;
+            if (minDate) input.min = minDate.toISOString().split('T')[0];
+            if (maxDate) input.max = maxDate.toISOString().split('T')[0];
+            input.style.cssText = `
+            width: 100%; padding: 6px; background: #1a1a1a;
+            border: 1px solid #555; border-radius: 3px; color: #fff; margin-bottom: 10px;
+        `;
+
+            return { label, input };
+        }
+
+        /**
+         * Create Apply + Clear button row for filter popups
+         * @param {Function} onApply
+         * @param {Function} onClear
+         * @returns {HTMLElement}
+         */
+        createPopupButtonRow(onApply, onClear) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; gap: 8px; margin-top: 10px;';
+
+            const applyBtn = document.createElement('button');
+            applyBtn.textContent = 'Apply';
+            applyBtn.style.cssText = `
+            flex: 1; padding: 6px; background: #4a90e2; color: white;
+            border: none; border-radius: 3px; cursor: pointer;
+        `;
+            applyBtn.addEventListener('click', onApply);
+
+            const clearBtn = document.createElement('button');
+            clearBtn.textContent = 'Clear';
+            clearBtn.style.cssText = `
+            flex: 1; padding: 6px; background: #666; color: white;
+            border: none; border-radius: 3px; cursor: pointer;
+        `;
+            clearBtn.addEventListener('click', onClear);
+
+            row.appendChild(applyBtn);
+            row.appendChild(clearBtn);
+            return row;
+        }
+
+        // ─── Utilities ───────────────────────────────────────────────────────────
+
+        /**
+         * Append a 16×16 or 20×20 SVG item icon to an element
+         * @param {HTMLElement} parent
+         * @param {string} itemHrid
+         * @param {number} size
+         */
+        appendItemIcon(parent, itemHrid, size = 20) {
+            const spriteUrl = this.getItemsSpriteUrl();
+            if (!spriteUrl) return;
+
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', String(size));
+            svg.setAttribute('height', String(size));
+            svg.style.flexShrink = '0';
+
+            const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+            use.setAttribute('href', `${spriteUrl}#${itemHrid.split('/').pop()}`);
+            svg.appendChild(use);
+            parent.appendChild(svg);
+        }
+
+        /**
+         * Get items sprite URL from DOM (cached)
+         * @returns {string|null}
+         */
+        getItemsSpriteUrl() {
+            if (!this.itemsSpriteUrl) {
+                const el = document.querySelector('use[href*="items_sprite"]');
+                if (el) {
+                    const href = el.getAttribute('href');
+                    this.itemsSpriteUrl = href ? href.split('#')[0] : null;
+                }
+            }
+            return this.itemsSpriteUrl;
+        }
+
+        /**
+         * Get item display name from HRID (cached)
+         * @param {string} itemHrid
+         * @returns {string}
+         */
+        getItemName(itemHrid) {
+            if (this.itemNameCache.has(itemHrid)) {
+                return this.itemNameCache.get(itemHrid);
+            }
+            const details = dataManager.getItemDetails(itemHrid);
+            const name = details?.name || itemHrid.split('/').pop().replace(/_/g, ' ');
+            this.itemNameCache.set(itemHrid, name);
+            return name;
+        }
+
+        /**
+         * Get paginated sessions for current page
+         * @returns {Array}
+         */
+        getPaginatedSessions() {
+            if (this.showAll) return this.filteredSessions;
+            const start = (this.currentPage - 1) * this.rowsPerPage;
+            return this.filteredSessions.slice(start, start + this.rowsPerPage);
+        }
+
+        /**
+         * Get total number of pages
+         * @returns {number}
+         */
+        getTotalPages() {
+            if (this.showAll) return 1;
+            return Math.ceil(this.filteredSessions.length / this.rowsPerPage);
+        }
+
+        /**
+         * Delete a single session by ID
+         * @param {string} sessionId
+         */
+        async deleteSession(sessionId) {
+            this.sessions = this.sessions.filter((s) => s.id !== sessionId);
+
+            try {
+                await transmuteHistoryTracker.deleteSessions(this.sessions);
+            } catch (error) {
+                console.error('[TransmuteHistoryViewer] Failed to delete session:', error);
+            }
+
+            this.applyFilters();
+            this.renderTable();
+        }
+
+        /**
+         * Export all sessions to a CSV file download
+         */
+        exportHistory() {
+            const escape = (val) => `"${String(val === null || val === undefined ? '' : val).replace(/"/g, '""')}"`;
+
+            const headers = ['Session Start', 'Input Item', 'Attempts', 'Successes', 'Failures', 'Results'];
+
+            const rows = this.sessions.map((session) => {
+                const start = new Date(session.startTime).toLocaleString();
+                const inputName = this.getItemName(session.inputItemHrid);
+                const failures = session.totalAttempts - session.totalSuccesses;
+
+                const resultParts = Object.entries(session.results || {})
+                    .sort(([, a], [, b]) => {
+                        if (a.isSelfReturn && !b.isSelfReturn) return 1;
+                        if (!a.isSelfReturn && b.isSelfReturn) return -1;
+                        return (b.totalValue || 0) - (a.totalValue || 0);
+                    })
+                    .map(([hrid, result]) => {
+                        const name = this.getItemName(hrid);
+                        if (result.isSelfReturn) {
+                            return `${name} x${result.count} (self-return)`;
+                        }
+                        const total = formatters_js.formatKMB(result.totalValue || 0, 1);
+                        const each = formatters_js.formatKMB(result.priceEach || 0, 1);
+                        return `${name} x${result.count} = ${total} (${each} each)`;
+                    });
+
+                return [start, inputName, session.totalAttempts, session.totalSuccesses, failures, resultParts.join('; ')]
+                    .map(escape)
+                    .join(',');
+            });
+
+            const csv = [headers.map(escape).join(','), ...rows].join('\n');
+            const date = new Date().toISOString().slice(0, 10);
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `transmute-history-${date}.csv`;
+            a.click();
+
+            URL.revokeObjectURL(url);
+        }
+
+        /**
+         * Clear all history after confirmation
+         */
+        async clearHistory() {
+            const confirmed = confirm(
+                `⚠️ This will permanently delete ALL transmute history (${this.sessions.length} sessions).\nThis cannot be undone.\n\nAre you sure?`
+            );
+            if (!confirmed) return;
+
+            try {
+                await transmuteHistoryTracker.clearHistory();
+                this.sessions = [];
+                this.filteredSessions = [];
+                alert('Transmute history cleared.');
+                this.applyFilters();
+                this.renderTable();
+            } catch (error) {
+                console.error('[TransmuteHistoryViewer] Failed to clear history:', error);
+                alert(`Failed to clear history: ${error.message}`);
+            }
+        }
+    }
+
+    const transmuteHistoryViewer = new TransmuteHistoryViewer();
+
+    var transmuteHistoryViewer$1 = {
+        name: 'Transmute History Viewer',
+        initialize: () => transmuteHistoryViewer.initialize(),
+        cleanup: () => transmuteHistoryViewer.disable(),
+    };
+
+    /**
+     * Coinify History Tracker
+     * Records coinify sessions via WebSocket and persists to IndexedDB.
+     *
+     * Session lifecycle:
+     * - Start: actions_updated with actionHrid === '/actions/alchemy/coinify'
+     * - Result: action_completed with same actionHrid
+     * - End: actions_updated with no coinify action, or different input item/enhancement level
+     *
+     * Result detection:
+     * - Success: endCharacterItems contains a coin item (presence indicates success)
+     * - Failure: no coin output in endCharacterItems
+     *
+     * Coins earned per success: itemDetails.sellPrice * 5 * bulkMultiplier
+     */
+
+
+    const COINIFY_ACTION_HRID = '/actions/alchemy/coinify';
+    const COIN_ITEM_HRID = '/items/coin';
+    const CATALYST_OF_COINIFICATION_HRID$1 = '/items/catalyst_of_coinification';
+    const PRIME_CATALYST_HRID$1 = '/items/prime_catalyst';
+    const STORAGE_KEY$1 = 'coinifySessions';
+    const STORAGE_STORE$1 = 'alchemyHistory';
+
+    class CoinifyHistoryTracker {
+        constructor() {
+            this.isInitialized = false;
+            this.characterId = null;
+            this.activeSession = null; // Current in-progress session object
+            this.handlers = {
+                actionsUpdated: (data) => this.handleActionsUpdated(data),
+                actionCompleted: (data) => this.handleActionCompleted(data),
+                initCharacterData: () => this.handleReconnect(),
+                characterSwitched: (data) => this.handleCharacterSwitched(data),
+            };
+        }
+
+        getStorageKey() {
+            return this.characterId ? `${STORAGE_KEY$1}_${this.characterId}` : STORAGE_KEY$1;
+        }
+
+        /**
+         * Initialize the tracker
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('alchemy_coinifyHistory')) {
+                return;
+            }
+
+            this.isInitialized = true;
+            this.characterId = dataManager.getCurrentCharacterId();
+
+            webSocketHook.on('actions_updated', this.handlers.actionsUpdated);
+            webSocketHook.on('action_completed', this.handlers.actionCompleted);
+            webSocketHook.on('init_character_data', this.handlers.initCharacterData);
+            dataManager.on('character_switched', this.handlers.characterSwitched);
+        }
+
+        /**
+         * Disable the tracker
+         */
+        disable() {
+            webSocketHook.off('actions_updated', this.handlers.actionsUpdated);
+            webSocketHook.off('action_completed', this.handlers.actionCompleted);
+            webSocketHook.off('init_character_data', this.handlers.initCharacterData);
+            dataManager.off('character_switched', this.handlers.characterSwitched);
+
+            if (this.activeSession) {
+                this.endSession();
+            }
+
+            this.isInitialized = false;
+            this.characterId = null;
+        }
+
+        /**
+         * Handle actions_updated — detect session start or end
+         * @param {Object} data - WebSocket message data
+         */
+        async handleActionsUpdated(data) {
+            const actions = data.endCharacterActions || [];
+            const coinifyAction = actions.find((a) => a.actionHrid === COINIFY_ACTION_HRID);
+
+            if (coinifyAction) {
+                const inputItemHrid = this.extractItemHrid(coinifyAction.primaryItemHash);
+                const enhancementLevel = this.extractEnhancementLevel(coinifyAction.primaryItemHash);
+
+                if (!inputItemHrid) {
+                    return;
+                }
+
+                if (!this.activeSession) {
+                    // No active session — start one
+                    await this.startSession(inputItemHrid, enhancementLevel, Date.now());
+                } else if (
+                    this.activeSession.inputItemHrid !== inputItemHrid ||
+                    this.activeSession.enhancementLevel !== enhancementLevel
+                ) {
+                    // Different item or enhancement level — end current session and start new one
+                    await this.endSession();
+                    await this.startSession(inputItemHrid, enhancementLevel, Date.now());
+                }
+                // Same item and level and active session — nothing to do
+            } else if (this.activeSession) {
+                // No coinify action in the update — end any active session
+                await this.endSession();
+            }
+        }
+
+        /**
+         * Handle action_completed — record one attempt result
+         * @param {Object} data - WebSocket message data
+         */
+        async handleActionCompleted(data) {
+            const action = data.endCharacterAction;
+            if (!action || action.actionHrid !== COINIFY_ACTION_HRID) {
+                return;
+            }
+
+            const inputItemHrid = this.extractItemHrid(action.primaryItemHash);
+            const enhancementLevel = this.extractEnhancementLevel(action.primaryItemHash);
+
+            if (!inputItemHrid) {
+                return;
+            }
+
+            // Ensure we have an active session for this item and level
+            if (
+                !this.activeSession ||
+                this.activeSession.inputItemHrid !== inputItemHrid ||
+                this.activeSession.enhancementLevel !== enhancementLevel
+            ) {
+                await this.startSession(inputItemHrid, enhancementLevel, Date.now());
+            }
+
+            // Count successes by number of coin entries (supports efficiency procs)
+            const coinEntries = (data.endCharacterItems || []).filter((item) => item.itemHrid === COIN_ITEM_HRID);
+            const successCount = coinEntries.length;
+
+            this.activeSession.totalAttempts += Math.max(successCount, 1);
+
+            if (successCount > 0) {
+                this.activeSession.totalSuccesses += successCount;
+                this.activeSession.totalCoinsEarned += this.activeSession.coinsPerSuccess * successCount;
+            }
+
+            // Track catalyst usage — catalysts are only consumed on success
+            const secondaryHrid = this.extractItemHrid(action.secondaryItemHash);
+            if (secondaryHrid === CATALYST_OF_COINIFICATION_HRID$1) {
+                this.activeSession.catalystOfCoinificationUsed += successCount;
+            } else if (secondaryHrid === PRIME_CATALYST_HRID$1) {
+                this.activeSession.primeCatalystUsed += successCount;
+            }
+
+            await this.saveActiveSession();
+        }
+
+        /**
+         * Handle reconnect — finalize any open session
+         */
+        async handleReconnect() {
+            if (this.activeSession) {
+                await this.endSession();
+            }
+        }
+
+        /**
+         * Handle character switch — update character ID and clear active session
+         * @param {Object} data - { newId, newName }
+         */
+        async handleCharacterSwitched(data) {
+            if (this.activeSession) {
+                await this.endSession();
+            }
+            this.characterId = data.newId || null;
+        }
+
+        /**
+         * Start a new session
+         * @param {string} inputItemHrid - Input item HRID
+         * @param {number} enhancementLevel - Enhancement level of input item
+         * @param {number} timestamp - Start timestamp in ms
+         */
+        async startSession(inputItemHrid, enhancementLevel, timestamp) {
+            const itemDetails = dataManager.getItemDetails(inputItemHrid);
+
+            if (!itemDetails?.alchemyDetail?.bulkMultiplier) {
+                console.error(`[CoinifyHistoryTracker] Item has no alchemyDetail.bulkMultiplier: ${inputItemHrid}`);
+            }
+            const bulkMultiplier = itemDetails?.alchemyDetail?.bulkMultiplier ?? 1;
+            const coinsPerSuccess = (itemDetails?.sellPrice || 0) * 5 * bulkMultiplier;
+
+            this.activeSession = {
+                id: `coinify_${timestamp}`,
+                startTime: timestamp,
+                inputItemHrid,
+                enhancementLevel,
+                totalAttempts: 0,
+                totalSuccesses: 0,
+                totalCoinsEarned: 0,
+                catalystOfCoinificationUsed: 0,
+                primeCatalystUsed: 0,
+                coinsPerSuccess,
+                bulkMultiplier,
+            };
+
+            await this.saveActiveSession();
+        }
+
+        /**
+         * End the active session
+         */
+        async endSession() {
+            if (!this.activeSession) {
+                return;
+            }
+
+            await this.saveActiveSession();
+            this.activeSession = null;
+        }
+
+        /**
+         * Save the active session to storage (upsert by id)
+         */
+        async saveActiveSession() {
+            if (!this.activeSession) {
+                return;
+            }
+
+            try {
+                const sessions = await this.loadSessions();
+                const index = sessions.findIndex((s) => s.id === this.activeSession.id);
+
+                if (index !== -1) {
+                    sessions[index] = this.activeSession;
+                } else {
+                    sessions.push(this.activeSession);
+                }
+
+                await storage.setJSON(this.getStorageKey(), sessions, STORAGE_STORE$1, true);
+            } catch (error) {
+                console.error('[CoinifyHistoryTracker] Failed to save session:', error);
+            }
+        }
+
+        /**
+         * Load all sessions from storage
+         * @returns {Promise<Array>} Array of session objects
+         */
+        async loadSessions() {
+            try {
+                return await storage.getJSON(this.getStorageKey(), STORAGE_STORE$1, []);
+            } catch (error) {
+                console.error('[CoinifyHistoryTracker] Failed to load sessions:', error);
+                return [];
+            }
+        }
+
+        /**
+         * Clear all history from storage
+         */
+        async clearHistory() {
+            try {
+                this.activeSession = null;
+                await storage.setJSON(this.getStorageKey(), [], STORAGE_STORE$1, true);
+            } catch (error) {
+                console.error('[CoinifyHistoryTracker] Failed to clear history:', error);
+            }
+        }
+
+        /**
+         * Persist a caller-supplied sessions array (used by viewer for single-row delete)
+         * @param {Array} sessions - Updated sessions array to persist
+         */
+        async deleteSessions(sessions) {
+            try {
+                await storage.setJSON(this.getStorageKey(), sessions, STORAGE_STORE$1, true);
+            } catch (error) {
+                console.error('[CoinifyHistoryTracker] Failed to save sessions after delete:', error);
+            }
+        }
+
+        /**
+         * Extract item HRID from a primaryItemHash string
+         * Format: "characterId::/item_locations/inventory::/items/item_name::N"
+         * @param {string} hash - Primary item hash
+         * @returns {string|null} Item HRID or null
+         */
+        extractItemHrid(hash) {
+            if (!hash) {
+                return null;
+            }
+
+            const parts = hash.split('::');
+            if (parts.length < 3) {
+                return null;
+            }
+
+            const hrid = parts[2];
+            return hrid.startsWith('/items/') ? hrid : null;
+        }
+
+        /**
+         * Extract enhancement level from a primaryItemHash string
+         * The level is the last segment after :: if it is a non-negative integer
+         * @param {string} hash - Primary item hash
+         * @returns {number} Enhancement level (0 if not present or not a number)
+         */
+        extractEnhancementLevel(hash) {
+            if (!hash) {
+                return 0;
+            }
+
+            const parts = hash.split('::');
+            const last = parts[parts.length - 1];
+
+            if (last && !last.startsWith('/')) {
+                const parsed = parseInt(last, 10);
+                if (!isNaN(parsed) && parsed >= 0) {
+                    return parsed;
+                }
+            }
+
+            return 0;
+        }
+    }
+
+    const coinifyHistoryTracker = new CoinifyHistoryTracker();
+
+    var coinifyHistoryTracker$1 = {
+        name: 'Coinify History Tracker',
+        initialize: () => coinifyHistoryTracker.initialize(),
+        cleanup: () => coinifyHistoryTracker.disable(),
+    };
+
+    /**
+     * Coinify History Viewer
+     * Modal UI for browsing coinify session history.
+     * Injected as a tab in the alchemy panel tab bar.
+     */
+
+
+    const CATALYST_OF_COINIFICATION_HRID = '/items/catalyst_of_coinification';
+    const PRIME_CATALYST_HRID = '/items/prime_catalyst';
+
+    class CoinifyHistoryViewer {
+        constructor() {
+            this.isInitialized = false;
+            this.modal = null;
+            this.sessions = [];
+            this.filteredSessions = [];
+            this.currentPage = 1;
+            this.rowsPerPage = 50;
+            this.showAll = false;
+            this.sortColumn = 'startTime';
+            this.sortDirection = 'desc';
+
+            // Column filters
+            this.filters = {
+                dateFrom: null,
+                dateTo: null,
+                selectedInputItems: [], // Array of itemHrids
+            };
+
+            this.activeFilterPopup = null;
+            this.activeFilterButton = null;
+            this.popupCloseHandler = null;
+
+            // Tab injection
+            this.alchemyTab = null;
+            this.tabWatcher = null;
+
+            // Caches
+            this.itemNameCache = new Map();
+            this.itemsSpriteUrl = null;
+            this.cachedDateRange = null;
+
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize the viewer
+         */
+        initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('alchemy_coinifyHistory')) {
+                return;
+            }
+
+            this.isInitialized = true;
+            this.addAlchemyTab();
+        }
+
+        /**
+         * Disable the viewer
+         */
+        disable() {
+            if (this.tabWatcher) {
+                this.tabWatcher();
+                this.tabWatcher = null;
+            }
+            if (this.alchemyTab && this.alchemyTab.parentNode) {
+                this.alchemyTab.remove();
+                this.alchemyTab = null;
+            }
+            if (this.modal) {
+                this.modal.remove();
+                this.modal = null;
+            }
+            this.timerRegistry.clearAll();
+            this.isInitialized = false;
+        }
+
+        // ─── Tab Injection ───────────────────────────────────────────────────────
+
+        /**
+         * Inject "Coinify History" tab into the alchemy tab bar.
+         * The alchemy tab bar contains Coinify, Decompose, Transmute, Unrefine, Current Action.
+         * We identify it by the presence of a "Coinify" tab text.
+         */
+        addAlchemyTab() {
+            const ensureTabExists = () => {
+                const tablist = document.querySelector('[role="tablist"]');
+                if (!tablist) return;
+
+                // Verify this is the alchemy tablist by checking for "Coinify" tab
+                const hasCoinify = Array.from(tablist.children).some(
+                    (btn) => btn.textContent.includes('Coinify') && !btn.dataset.mwiCoinifyHistoryTab
+                );
+                if (!hasCoinify) return;
+
+                // Already injected?
+                if (tablist.querySelector('[data-mwi-coinify-history-tab="true"]')) return;
+
+                // Clone an existing tab for structure
+                const referenceTab = Array.from(tablist.children).find(
+                    (btn) => btn.textContent.includes('Coinify') && !btn.dataset.mwiCoinifyHistoryTab
+                );
+                if (!referenceTab) return;
+
+                const tab = referenceTab.cloneNode(true);
+                tab.setAttribute('data-mwi-coinify-history-tab', 'true');
+                tab.classList.remove('Mui-selected');
+                tab.setAttribute('aria-selected', 'false');
+                tab.setAttribute('tabindex', '-1');
+
+                // Set label
+                const badge = tab.querySelector('.TabsComponent_badge__1Du26');
+                if (badge) {
+                    // Replace first text node (the label) while keeping badge span
+                    const badgeSpan = badge.querySelector('.MuiBadge-badge');
+                    badge.textContent = '';
+                    badge.appendChild(document.createTextNode('Coinify History'));
+                    if (badgeSpan) badge.appendChild(badgeSpan);
+                } else {
+                    tab.textContent = 'Coinify History';
+                }
+
+                tab.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.openModal();
+                });
+
+                tablist.appendChild(tab);
+                this.alchemyTab = tab;
+            };
+
+            // Watch for DOM changes that recreate the tablist
+            if (!this.tabWatcher) {
+                this.tabWatcher = domObserverHelpers_js.createMutationWatcher(
+                    document.body,
+                    () => {
+                        // If our tab was removed from DOM, clear reference
+                        if (this.alchemyTab && !document.body.contains(this.alchemyTab)) {
+                            this.alchemyTab = null;
+                        }
+                        ensureTabExists();
+                    },
+                    { childList: true, subtree: true }
+                );
+            }
+
+            ensureTabExists();
+        }
+
+        // ─── Modal ───────────────────────────────────────────────────────────────
+
+        /**
+         * Open the modal — load sessions and render
+         */
+        async openModal() {
+            this.sessions = await coinifyHistoryTracker.loadSessions();
+            this.cachedDateRange = null;
+            this.applyFilters();
+
+            if (!this.modal) {
+                this.createModal();
+            }
+
+            this.modal.style.display = 'flex';
+            this.renderTable();
+        }
+
+        /**
+         * Close the modal
+         */
+        closeModal() {
+            if (this.modal) {
+                this.modal.style.display = 'none';
+            }
+            this.closeActiveFilterPopup();
+        }
+
+        /**
+         * Create modal DOM structure
+         */
+        createModal() {
+            this.modal = document.createElement('div');
+            this.modal.className = 'mwi-coinify-history-modal';
+            this.modal.style.cssText = `
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+        `;
+
+            const content = document.createElement('div');
+            content.className = 'mwi-coinify-history-content';
+            content.style.cssText = `
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 20px;
+            width: fit-content;
+            min-width: 500px;
+            max-width: 95vw;
+            max-height: 90%;
+            overflow: auto;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        `;
+
+            // Header
+            const header = document.createElement('div');
+            header.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        `;
+
+            const title = document.createElement('h2');
+            title.textContent = 'Coinify History';
+            title.style.cssText = 'margin: 0; color: #fff;';
+
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = '✕';
+            closeBtn.style.cssText = `
+            background: none; border: none; color: #fff;
+            font-size: 24px; cursor: pointer; padding: 0;
+            width: 30px; height: 30px;
+        `;
+            closeBtn.addEventListener('click', () => this.closeModal());
+
+            header.appendChild(title);
+            header.appendChild(closeBtn);
+
+            // Controls
+            const controls = document.createElement('div');
+            controls.className = 'mwi-coinify-history-controls';
+            controls.style.cssText = `
+            display: flex;
+            gap: 10px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+        `;
+
+            // Active filter badges row
+            const badges = document.createElement('div');
+            badges.className = 'mwi-coinify-history-badges';
+            badges.style.cssText = `
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+            min-height: 28px;
+            margin-bottom: 10px;
+        `;
+
+            // Table container
+            const tableContainer = document.createElement('div');
+            tableContainer.className = 'mwi-coinify-history-table-container';
+            tableContainer.style.cssText = 'overflow-x: auto;';
+
+            // Pagination
+            const pagination = document.createElement('div');
+            pagination.className = 'mwi-coinify-history-pagination';
+            pagination.style.cssText = `
+            margin-top: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        `;
+
+            content.appendChild(header);
+            content.appendChild(controls);
+            content.appendChild(badges);
+            content.appendChild(tableContainer);
+            content.appendChild(pagination);
+            this.modal.appendChild(content);
+            document.body.appendChild(this.modal);
+
+            // Close on backdrop click
+            this.modal.addEventListener('click', (e) => {
+                if (e.target === this.modal) this.closeModal();
+            });
+        }
+
+        // ─── Filtering ───────────────────────────────────────────────────────────
+
+        /**
+         * Apply all active filters to this.sessions → this.filteredSessions
+         */
+        applyFilters() {
+            this.cachedDateRange = null;
+
+            const hasDateFilter = !!(this.filters.dateFrom || this.filters.dateTo);
+            let dateToEndOfDay = null;
+            if (hasDateFilter && this.filters.dateTo) {
+                dateToEndOfDay = new Date(this.filters.dateTo);
+                dateToEndOfDay.setHours(23, 59, 59, 999);
+            }
+
+            const hasItemFilter = this.filters.selectedInputItems.length > 0;
+            const itemFilterSet = hasItemFilter ? new Set(this.filters.selectedInputItems) : null;
+
+            const filtered = this.sessions.filter((session) => {
+                // Date filter
+                if (hasDateFilter) {
+                    const d = new Date(session.startTime);
+                    if (this.filters.dateFrom && d < this.filters.dateFrom) return false;
+                    if (dateToEndOfDay && d > dateToEndOfDay) return false;
+                }
+
+                // Input item filter
+                if (hasItemFilter && !itemFilterSet.has(session.inputItemHrid)) return false;
+
+                return true;
+            });
+
+            // Sort
+            filtered.sort((a, b) => {
+                const aVal = a[this.sortColumn] ?? 0;
+                const bVal = b[this.sortColumn] ?? 0;
+                return this.sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+            });
+
+            this.filteredSessions = filtered;
+            this.currentPage = 1;
+        }
+
+        /**
+         * Check if a column has an active filter
+         * @param {string} col
+         * @returns {boolean}
+         */
+        hasActiveFilter(col) {
+            switch (col) {
+                case 'startTime':
+                    return !!(this.filters.dateFrom || this.filters.dateTo);
+                case 'inputItemHrid':
+                    return this.filters.selectedInputItems.length > 0;
+                default:
+                    return false;
+            }
+        }
+
+        /**
+         * Returns true if any filter is active
+         */
+        hasAnyFilter() {
+            return this.hasActiveFilter('startTime') || this.hasActiveFilter('inputItemHrid');
+        }
+
+        /**
+         * Clear all filters
+         */
+        clearAllFilters() {
+            this.filters.dateFrom = null;
+            this.filters.dateTo = null;
+            this.filters.selectedInputItems = [];
+            this.applyFilters();
+            this.renderTable();
+        }
+
+        // ─── Rendering ───────────────────────────────────────────────────────────
+
+        /**
+         * Full render: controls + badges + table + pagination
+         */
+        renderTable() {
+            this.renderControls();
+            this.renderBadges();
+
+            const tableContainer = this.modal.querySelector('.mwi-coinify-history-table-container');
+            while (tableContainer.firstChild) tableContainer.removeChild(tableContainer.firstChild);
+
+            const table = document.createElement('table');
+            table.style.cssText = 'width: max-content; border-collapse: collapse; color: #fff; white-space: nowrap;';
+
+            // Header
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            headerRow.style.background = '#1a1a1a';
+
+            const columns = [
+                { key: 'startTime', label: 'Session Start', filterable: true },
+                { key: 'inputItemHrid', label: 'Input Item', filterable: true },
+                { key: 'enhancementLevel', label: 'Enh. Level', filterable: false },
+                { key: 'totalAttempts', label: 'Attempts', filterable: false },
+                { key: 'totalSuccesses', label: 'Successes', filterable: false },
+                { key: '_successRate', label: 'Success Rate', filterable: false },
+                { key: 'totalCoinsEarned', label: 'Coins Earned', filterable: false },
+                { key: '_catalystOfCoinification', label: 'Catalyst of Coinification', filterable: false },
+                { key: '_primeCatalyst', label: 'Prime Catalyst', filterable: false },
+                { key: '_delete', label: '', filterable: false },
+            ];
+
+            columns.forEach((col) => {
+                const th = document.createElement('th');
+                th.style.cssText = `
+                padding: 10px;
+                text-align: left;
+                border-bottom: 2px solid #555;
+                user-select: none;
+                white-space: nowrap;
+            `;
+
+                const headerContent = document.createElement('div');
+                headerContent.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+                const labelSpan = document.createElement('span');
+                labelSpan.style.cursor = 'pointer';
+
+                // Columns starting with _ are computed, not directly sortable by field
+                const isSortable = !col.key.startsWith('_');
+                const isCatalystCol = col.key === '_catalystOfCoinification' || col.key === '_primeCatalyst';
+
+                if (isSortable) {
+                    if (this.sortColumn === col.key) {
+                        labelSpan.textContent = col.label + (this.sortDirection === 'asc' ? ' ▲' : ' ▼');
+                    } else {
+                        labelSpan.textContent = col.label;
+                    }
+                    labelSpan.addEventListener('click', () => {
+                        if (this.sortColumn === col.key) {
+                            this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+                        } else {
+                            this.sortColumn = col.key;
+                            this.sortDirection = 'desc';
+                        }
+                        this.applyFilters();
+                        this.renderTable();
+                    });
+                } else if (isCatalystCol) {
+                    // Render icon as header with item name as tooltip
+                    const hrid =
+                        col.key === '_catalystOfCoinification' ? CATALYST_OF_COINIFICATION_HRID : PRIME_CATALYST_HRID;
+                    labelSpan.title = col.label;
+                    labelSpan.style.cursor = 'default';
+                    this.appendItemIcon(labelSpan, hrid, 20);
+                } else {
+                    labelSpan.textContent = col.label;
+                    labelSpan.style.cursor = 'default';
+                }
+
+                headerContent.appendChild(labelSpan);
+
+                if (col.filterable) {
+                    const filterBtn = document.createElement('button');
+                    filterBtn.textContent = '⋮';
+                    filterBtn.style.cssText = `
+                    background: none; border: none;
+                    color: ${this.hasActiveFilter(col.key) ? '#4a90e2' : '#aaa'};
+                    cursor: pointer; font-size: 16px;
+                    padding: 2px 4px; font-weight: bold;
+                `;
+                    filterBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.showFilterPopup(col.key, filterBtn);
+                    });
+                    headerContent.appendChild(filterBtn);
+                }
+
+                th.appendChild(headerContent);
+                headerRow.appendChild(th);
+            });
+
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+
+            // Body
+            const tbody = document.createElement('tbody');
+            const paginated = this.getPaginatedSessions();
+
+            if (paginated.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.colSpan = columns.length;
+                cell.textContent =
+                    this.sessions.length === 0
+                        ? 'No coinify history recorded yet.'
+                        : 'No sessions match the current filters.';
+                cell.style.cssText = 'padding: 20px; text-align: center; color: #888;';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+            } else {
+                paginated.forEach((session, index) => {
+                    const row = document.createElement('tr');
+                    row.style.cssText = `
+                    border-bottom: 1px solid #333;
+                    background: ${index % 2 === 0 ? '#2a2a2a' : '#252525'};
+                `;
+
+                    // Session Start
+                    const dateCell = document.createElement('td');
+                    dateCell.textContent = new Date(session.startTime).toLocaleString();
+                    dateCell.style.padding = '6px 10px';
+                    row.appendChild(dateCell);
+
+                    // Input Item
+                    const inputCell = document.createElement('td');
+                    inputCell.style.cssText = 'padding: 6px 10px; display: flex; align-items: center; gap: 8px;';
+                    this.appendItemIcon(inputCell, session.inputItemHrid, 20);
+                    const inputName = document.createElement('span');
+                    inputName.textContent = this.getItemName(session.inputItemHrid);
+                    inputCell.appendChild(inputName);
+                    row.appendChild(inputCell);
+
+                    // Enhancement Level
+                    const enhCell = document.createElement('td');
+                    enhCell.textContent = session.enhancementLevel > 0 ? `+${session.enhancementLevel}` : '0';
+                    enhCell.style.cssText = 'padding: 6px 10px; text-align: center;';
+                    row.appendChild(enhCell);
+
+                    // Attempts
+                    const attemptsCell = document.createElement('td');
+                    attemptsCell.textContent = session.totalAttempts;
+                    attemptsCell.style.padding = '6px 10px';
+                    row.appendChild(attemptsCell);
+
+                    // Successes
+                    const successCell = document.createElement('td');
+                    const failures = session.totalAttempts - session.totalSuccesses;
+                    successCell.textContent = `${session.totalSuccesses} (${failures} failed)`;
+                    successCell.style.cssText = `
+                    padding: 6px 10px;
+                    color: ${failures > 0 ? '#fbbf24' : '#4ade80'};
+                `;
+                    row.appendChild(successCell);
+
+                    // Success Rate
+                    const rateCell = document.createElement('td');
+                    const rate =
+                        session.totalAttempts > 0
+                            ? ((session.totalSuccesses / session.totalAttempts) * 100).toFixed(1)
+                            : '—';
+                    rateCell.textContent = session.totalAttempts > 0 ? `${rate}%` : '—';
+                    rateCell.style.padding = '6px 10px';
+                    row.appendChild(rateCell);
+
+                    // Coins Earned
+                    const earnedCell = document.createElement('td');
+                    earnedCell.textContent = formatters_js.formatKMB(session.totalCoinsEarned || 0, 1);
+                    earnedCell.style.cssText = 'padding: 6px 10px; color: #fbbf24;';
+                    row.appendChild(earnedCell);
+
+                    // Catalyst of Coinification
+                    const cocCell = document.createElement('td');
+                    cocCell.style.cssText = 'padding: 6px 10px;';
+                    this.renderCatalystCell(
+                        cocCell,
+                        CATALYST_OF_COINIFICATION_HRID,
+                        session.catalystOfCoinificationUsed || 0
+                    );
+                    row.appendChild(cocCell);
+
+                    // Prime Catalyst
+                    const pcCell = document.createElement('td');
+                    pcCell.style.cssText = 'padding: 6px 10px;';
+                    this.renderCatalystCell(pcCell, PRIME_CATALYST_HRID, session.primeCatalystUsed || 0);
+                    row.appendChild(pcCell);
+
+                    // Delete
+                    const deleteCell = document.createElement('td');
+                    deleteCell.style.cssText = 'padding: 6px 4px; text-align: center;';
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.textContent = '✕';
+                    deleteBtn.title = 'Delete this session';
+                    deleteBtn.style.cssText = `
+                    background: none; border: none; color: #dc2626;
+                    cursor: pointer; font-size: 14px; padding: 2px 6px;
+                    border-radius: 3px; line-height: 1;
+                `;
+                    deleteBtn.addEventListener('mouseenter', () => {
+                        deleteBtn.style.background = 'rgba(220,38,38,0.15)';
+                    });
+                    deleteBtn.addEventListener('mouseleave', () => {
+                        deleteBtn.style.background = 'none';
+                    });
+                    deleteBtn.addEventListener('click', () => this.deleteSession(session.id));
+                    deleteCell.appendChild(deleteBtn);
+                    row.appendChild(deleteCell);
+
+                    tbody.appendChild(row);
+                });
+            }
+
+            table.appendChild(tbody);
+            tableContainer.appendChild(table);
+            this.renderPagination();
+        }
+
+        /**
+         * Render a catalyst cell: icon + count, or — if zero
+         * @param {HTMLElement} cell
+         * @param {string} catalystHrid
+         * @param {number} count
+         */
+        renderCatalystCell(cell, catalystHrid, count) {
+            if (count === 0) {
+                const dash = document.createElement('span');
+                dash.textContent = '—';
+                dash.style.color = '#888';
+                cell.appendChild(dash);
+                return;
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+
+            this.appendItemIcon(wrapper, catalystHrid, 18);
+
+            const countSpan = document.createElement('span');
+            countSpan.textContent = count.toLocaleString();
+            wrapper.appendChild(countSpan);
+
+            cell.appendChild(wrapper);
+        }
+
+        /**
+         * Render controls bar (stats + action buttons)
+         */
+        renderControls() {
+            const controls = this.modal.querySelector('.mwi-coinify-history-controls');
+            while (controls.firstChild) controls.removeChild(controls.firstChild);
+
+            // Stats
+            const stats = document.createElement('span');
+            stats.style.cssText = 'color: #aaa; font-size: 14px;';
+            stats.textContent = `${this.filteredSessions.length} session${this.filteredSessions.length !== 1 ? 's' : ''}`;
+            controls.appendChild(stats);
+
+            const rightGroup = document.createElement('div');
+            rightGroup.style.cssText = 'display: flex; gap: 8px; align-items: center;';
+
+            // Clear All Filters button (only when filters active)
+            if (this.hasAnyFilter()) {
+                const clearFiltersBtn = document.createElement('button');
+                clearFiltersBtn.textContent = 'Clear All Filters';
+                clearFiltersBtn.style.cssText = `
+                padding: 6px 12px; background: #e67e22; color: white;
+                border: none; border-radius: 4px; cursor: pointer;
+            `;
+                clearFiltersBtn.addEventListener('click', () => this.clearAllFilters());
+                rightGroup.appendChild(clearFiltersBtn);
+            }
+
+            // Export button
+            const exportBtn = document.createElement('button');
+            exportBtn.textContent = 'Export';
+            exportBtn.style.cssText = `
+            padding: 6px 12px; background: #2563eb; color: white;
+            border: none; border-radius: 4px; cursor: pointer;
+        `;
+            exportBtn.addEventListener('click', () => this.exportHistory());
+            rightGroup.appendChild(exportBtn);
+
+            // Clear History button
+            const clearBtn = document.createElement('button');
+            clearBtn.textContent = 'Clear History';
+            clearBtn.style.cssText = `
+            padding: 6px 12px; background: #dc2626; color: white;
+            border: none; border-radius: 4px; cursor: pointer;
+        `;
+            clearBtn.addEventListener('click', () => this.clearHistory());
+            rightGroup.appendChild(clearBtn);
+
+            controls.appendChild(rightGroup);
+        }
+
+        /**
+         * Render active filter badges
+         */
+        renderBadges() {
+            const container = this.modal.querySelector('.mwi-coinify-history-badges');
+            while (container.firstChild) container.removeChild(container.firstChild);
+
+            const badges = [];
+
+            if (this.filters.dateFrom || this.filters.dateTo) {
+                const parts = [];
+                if (this.filters.dateFrom) parts.push(this.filters.dateFrom.toLocaleDateString());
+                if (this.filters.dateTo) parts.push(this.filters.dateTo.toLocaleDateString());
+                badges.push({
+                    label: `Date: ${parts.join(' - ')}`,
+                    onRemove: () => {
+                        this.filters.dateFrom = null;
+                        this.filters.dateTo = null;
+                        this.applyFilters();
+                        this.renderTable();
+                    },
+                });
+            }
+
+            if (this.filters.selectedInputItems.length > 0) {
+                const label =
+                    this.filters.selectedInputItems.length === 1
+                        ? this.getItemName(this.filters.selectedInputItems[0])
+                        : `${this.filters.selectedInputItems.length} input items`;
+                badges.push({
+                    label: `Input: ${label}`,
+                    icon: this.filters.selectedInputItems[0],
+                    onRemove: () => {
+                        this.filters.selectedInputItems = [];
+                        this.applyFilters();
+                        this.renderTable();
+                    },
+                });
+            }
+
+            badges.forEach((badge) => {
+                const el = document.createElement('div');
+                el.style.cssText = `
+                display: flex; align-items: center; gap: 6px;
+                padding: 4px 8px; background: #3a3a3a;
+                border: 1px solid #555; border-radius: 4px;
+                color: #aaa; font-size: 13px;
+            `;
+
+                if (badge.icon) {
+                    this.appendItemIcon(el, badge.icon, 14);
+                }
+
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = badge.label;
+                el.appendChild(labelSpan);
+
+                const removeBtn = document.createElement('button');
+                removeBtn.textContent = '✕';
+                removeBtn.style.cssText = `
+                background: none; border: none; color: #aaa;
+                cursor: pointer; padding: 0; font-size: 13px; line-height: 1;
+            `;
+                removeBtn.addEventListener('click', badge.onRemove);
+                el.appendChild(removeBtn);
+
+                container.appendChild(el);
+            });
+        }
+
+        /**
+         * Render pagination controls
+         */
+        renderPagination() {
+            const pagination = this.modal.querySelector('.mwi-coinify-history-pagination');
+            while (pagination.firstChild) pagination.removeChild(pagination.firstChild);
+
+            const leftSide = document.createElement('div');
+            leftSide.style.cssText = 'display: flex; gap: 8px; align-items: center; color: #aaa;';
+
+            const label = document.createElement('span');
+            label.textContent = 'Rows per page:';
+
+            const rowsInput = document.createElement('input');
+            rowsInput.type = 'number';
+            rowsInput.value = this.rowsPerPage;
+            rowsInput.min = '1';
+            rowsInput.disabled = this.showAll;
+            rowsInput.style.cssText = `
+            width: 60px; padding: 4px 8px;
+            border: 1px solid #555; border-radius: 4px;
+            background: ${this.showAll ? '#333' : '#1a1a1a'};
+            color: ${this.showAll ? '#666' : '#fff'};
+        `;
+            rowsInput.addEventListener('change', (e) => {
+                this.rowsPerPage = Math.max(1, parseInt(e.target.value) || 50);
+                this.currentPage = 1;
+                this.renderTable();
+            });
+
+            const showAllLabel = document.createElement('label');
+            showAllLabel.style.cssText = 'cursor: pointer; color: #aaa; display: flex; align-items: center; gap: 4px;';
+
+            const showAllCheckbox = document.createElement('input');
+            showAllCheckbox.type = 'checkbox';
+            showAllCheckbox.checked = this.showAll;
+            showAllCheckbox.style.cursor = 'pointer';
+            showAllCheckbox.addEventListener('change', (e) => {
+                this.showAll = e.target.checked;
+                rowsInput.disabled = this.showAll;
+                rowsInput.style.background = this.showAll ? '#333' : '#1a1a1a';
+                rowsInput.style.color = this.showAll ? '#666' : '#fff';
+                this.currentPage = 1;
+                this.renderTable();
+            });
+
+            showAllLabel.appendChild(showAllCheckbox);
+            showAllLabel.appendChild(document.createTextNode('Show All'));
+
+            leftSide.appendChild(label);
+            leftSide.appendChild(rowsInput);
+            leftSide.appendChild(showAllLabel);
+
+            const rightSide = document.createElement('div');
+            rightSide.style.cssText = 'display: flex; gap: 8px; align-items: center; color: #aaa;';
+
+            if (!this.showAll) {
+                const totalPages = this.getTotalPages();
+
+                const prevBtn = document.createElement('button');
+                prevBtn.textContent = '◀';
+                prevBtn.disabled = this.currentPage === 1;
+                prevBtn.style.cssText = `
+                padding: 4px 12px;
+                background: ${this.currentPage === 1 ? '#333' : '#4a90e2'};
+                color: ${this.currentPage === 1 ? '#666' : 'white'};
+                border: none; border-radius: 4px;
+                cursor: ${this.currentPage === 1 ? 'default' : 'pointer'};
+            `;
+                prevBtn.addEventListener('click', () => {
+                    if (this.currentPage > 1) {
+                        this.currentPage--;
+                        this.renderTable();
+                    }
+                });
+
+                const pageInfo = document.createElement('span');
+                pageInfo.textContent = `Page ${this.currentPage} of ${totalPages || 1}`;
+
+                const nextBtn = document.createElement('button');
+                nextBtn.textContent = '▶';
+                nextBtn.disabled = this.currentPage >= totalPages;
+                nextBtn.style.cssText = `
+                padding: 4px 12px;
+                background: ${this.currentPage >= totalPages ? '#333' : '#4a90e2'};
+                color: ${this.currentPage >= totalPages ? '#666' : 'white'};
+                border: none; border-radius: 4px;
+                cursor: ${this.currentPage >= totalPages ? 'default' : 'pointer'};
+            `;
+                nextBtn.addEventListener('click', () => {
+                    if (this.currentPage < totalPages) {
+                        this.currentPage++;
+                        this.renderTable();
+                    }
+                });
+
+                rightSide.appendChild(prevBtn);
+                rightSide.appendChild(pageInfo);
+                rightSide.appendChild(nextBtn);
+            } else {
+                const info = document.createElement('span');
+                info.textContent = `Showing all ${this.filteredSessions.length} sessions`;
+                rightSide.appendChild(info);
+            }
+
+            pagination.appendChild(leftSide);
+            pagination.appendChild(rightSide);
+        }
+
+        // ─── Filter Popups ───────────────────────────────────────────────────────
+
+        /**
+         * Show the appropriate filter popup for a column
+         * @param {string} columnKey
+         * @param {HTMLElement} buttonElement
+         */
+        showFilterPopup(columnKey, buttonElement) {
+            // Toggle behavior
+            if (this.activeFilterPopup && this.activeFilterButton === buttonElement) {
+                this.closeActiveFilterPopup();
+                return;
+            }
+
+            this.closeActiveFilterPopup();
+
+            let popup;
+            switch (columnKey) {
+                case 'startTime':
+                    popup = this.createDateFilterPopup();
+                    break;
+                case 'inputItemHrid':
+                    popup = this.createInputItemFilterPopup();
+                    break;
+                default:
+                    return;
+            }
+
+            const rect = buttonElement.getBoundingClientRect();
+            popup.style.position = 'fixed';
+            popup.style.top = `${rect.bottom + 5}px`;
+            popup.style.left = `${rect.left}px`;
+            popup.style.zIndex = '10002';
+
+            document.body.appendChild(popup);
+            this.activeFilterPopup = popup;
+            this.activeFilterButton = buttonElement;
+
+            this.popupCloseHandler = (e) => {
+                if (e.target.type === 'date' || e.target.closest?.('input[type="date"]')) return;
+                if (!popup.contains(e.target) && e.target !== buttonElement) {
+                    this.closeActiveFilterPopup();
+                }
+            };
+            const t = setTimeout(() => document.addEventListener('click', this.popupCloseHandler), 10);
+            this.timerRegistry.registerTimeout(t);
+        }
+
+        /**
+         * Close and clean up the active filter popup
+         */
+        closeActiveFilterPopup() {
+            if (this.activeFilterPopup) {
+                this.activeFilterPopup.remove();
+                this.activeFilterPopup = null;
+            }
+            if (this.popupCloseHandler) {
+                document.removeEventListener('click', this.popupCloseHandler);
+                this.popupCloseHandler = null;
+            }
+            this.activeFilterButton = null;
+        }
+
+        /**
+         * Create date range filter popup
+         * @returns {HTMLElement}
+         */
+        createDateFilterPopup() {
+            const popup = this.createPopupBase('Filter by Date');
+
+            // Compute available range
+            if (!this.cachedDateRange) {
+                const timestamps = this.sessions.map((s) => s.startTime).filter(Boolean);
+                if (timestamps.length > 0) {
+                    this.cachedDateRange = {
+                        minDate: new Date(Math.min(...timestamps)),
+                        maxDate: new Date(Math.max(...timestamps)),
+                    };
+                } else {
+                    this.cachedDateRange = { minDate: null, maxDate: null };
+                }
+            }
+
+            const { minDate, maxDate } = this.cachedDateRange;
+
+            if (minDate && maxDate) {
+                const rangeInfo = document.createElement('div');
+                rangeInfo.style.cssText = `
+                color: #aaa; font-size: 11px; margin-bottom: 10px;
+                padding: 6px; background: #1a1a1a; border-radius: 3px;
+            `;
+                rangeInfo.textContent = `Available: ${minDate.toLocaleDateString()} - ${maxDate.toLocaleDateString()}`;
+                popup.appendChild(rangeInfo);
+            }
+
+            const fromInput = this.createDateInput(
+                'From:',
+                this.filters.dateFrom ? this.filters.dateFrom.toISOString().split('T')[0] : '',
+                minDate,
+                maxDate
+            );
+            const toInput = this.createDateInput(
+                'To:',
+                this.filters.dateTo ? this.filters.dateTo.toISOString().split('T')[0] : '',
+                minDate,
+                maxDate
+            );
+
+            popup.appendChild(fromInput.label);
+            popup.appendChild(fromInput.input);
+            popup.appendChild(toInput.label);
+            popup.appendChild(toInput.input);
+
+            const btnRow = this.createPopupButtonRow(
+                () => {
+                    this.filters.dateFrom = fromInput.input.value ? new Date(fromInput.input.value) : null;
+                    this.filters.dateTo = toInput.input.value ? new Date(toInput.input.value) : null;
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                },
+                () => {
+                    this.filters.dateFrom = null;
+                    this.filters.dateTo = null;
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                }
+            );
+            popup.appendChild(btnRow);
+
+            return popup;
+        }
+
+        /**
+         * Create input item filter popup (checkbox list with search)
+         * @returns {HTMLElement}
+         */
+        createInputItemFilterPopup() {
+            const popup = this.createPopupBase('Filter by Input Item');
+            popup.style.minWidth = '220px';
+
+            // Gather unique input items from all sessions
+            const itemSet = new Map();
+            this.sessions.forEach((s) => {
+                if (!itemSet.has(s.inputItemHrid)) {
+                    itemSet.set(s.inputItemHrid, this.getItemName(s.inputItemHrid));
+                }
+            });
+            const allItems = Array.from(itemSet.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+
+            // Track pending selection (local to this popup)
+            const pending = new Set(this.filters.selectedInputItems);
+
+            // Search box
+            const searchInput = document.createElement('input');
+            searchInput.type = 'text';
+            searchInput.placeholder = 'Search items...';
+            searchInput.style.cssText = `
+            width: 100%; padding: 6px; margin-bottom: 8px;
+            background: #1a1a1a; border: 1px solid #555;
+            border-radius: 3px; color: #fff; box-sizing: border-box;
+        `;
+
+            const listContainer = document.createElement('div');
+            listContainer.style.cssText = 'max-height: 200px; overflow-y: auto;';
+
+            const renderList = (filterText) => {
+                while (listContainer.firstChild) listContainer.removeChild(listContainer.firstChild);
+                const term = filterText.toLowerCase();
+                const visible = term ? allItems.filter(([, name]) => name.toLowerCase().includes(term)) : allItems;
+
+                visible.forEach(([hrid, name]) => {
+                    const row = document.createElement('label');
+                    row.style.cssText = `
+                    display: flex; align-items: center; gap: 8px;
+                    padding: 4px 2px; cursor: pointer; color: #ddd;
+                `;
+
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.checked = pending.has(hrid);
+                    cb.style.cursor = 'pointer';
+                    cb.addEventListener('change', () => {
+                        if (cb.checked) pending.add(hrid);
+                        else pending.delete(hrid);
+                    });
+
+                    this.appendItemIcon(row, hrid, 16);
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = name;
+
+                    row.appendChild(cb);
+                    row.appendChild(nameSpan);
+                    listContainer.appendChild(row);
+                });
+            };
+
+            searchInput.addEventListener('input', () => renderList(searchInput.value));
+            renderList('');
+
+            popup.appendChild(searchInput);
+            popup.appendChild(listContainer);
+
+            const btnRow = this.createPopupButtonRow(
+                () => {
+                    this.filters.selectedInputItems = Array.from(pending);
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                },
+                () => {
+                    this.filters.selectedInputItems = [];
+                    this.applyFilters();
+                    this.renderTable();
+                    this.closeActiveFilterPopup();
+                }
+            );
+            popup.appendChild(btnRow);
+
+            return popup;
+        }
+
+        // ─── Popup Helpers ───────────────────────────────────────────────────────
+
+        /**
+         * Create a styled popup base div with a title
+         * @param {string} titleText
+         * @returns {HTMLElement}
+         */
+        createPopupBase(titleText) {
+            const popup = document.createElement('div');
+            popup.style.cssText = `
+            background: #2a2a2a; border: 1px solid #555;
+            border-radius: 4px; padding: 12px; min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        `;
+
+            const title = document.createElement('div');
+            title.textContent = titleText;
+            title.style.cssText = 'color: #fff; font-weight: bold; margin-bottom: 10px;';
+            popup.appendChild(title);
+
+            return popup;
+        }
+
+        /**
+         * Create a date input with label
+         * @param {string} labelText
+         * @param {string} value
+         * @param {Date|null} minDate
+         * @param {Date|null} maxDate
+         * @returns {{ label: HTMLElement, input: HTMLInputElement }}
+         */
+        createDateInput(labelText, value, minDate, maxDate) {
+            const label = document.createElement('label');
+            label.textContent = labelText;
+            label.style.cssText = 'display: block; color: #aaa; margin-bottom: 4px; font-size: 12px;';
+
+            const input = document.createElement('input');
+            input.type = 'date';
+            input.value = value;
+            if (minDate) input.min = minDate.toISOString().split('T')[0];
+            if (maxDate) input.max = maxDate.toISOString().split('T')[0];
+            input.style.cssText = `
+            width: 100%; padding: 6px; background: #1a1a1a;
+            border: 1px solid #555; border-radius: 3px; color: #fff; margin-bottom: 10px;
+        `;
+
+            return { label, input };
+        }
+
+        /**
+         * Create Apply + Clear button row for filter popups
+         * @param {Function} onApply
+         * @param {Function} onClear
+         * @returns {HTMLElement}
+         */
+        createPopupButtonRow(onApply, onClear) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display: flex; gap: 8px; margin-top: 10px;';
+
+            const applyBtn = document.createElement('button');
+            applyBtn.textContent = 'Apply';
+            applyBtn.style.cssText = `
+            flex: 1; padding: 6px; background: #4a90e2; color: white;
+            border: none; border-radius: 3px; cursor: pointer;
+        `;
+            applyBtn.addEventListener('click', onApply);
+
+            const clearBtn = document.createElement('button');
+            clearBtn.textContent = 'Clear';
+            clearBtn.style.cssText = `
+            flex: 1; padding: 6px; background: #666; color: white;
+            border: none; border-radius: 3px; cursor: pointer;
+        `;
+            clearBtn.addEventListener('click', onClear);
+
+            row.appendChild(applyBtn);
+            row.appendChild(clearBtn);
+            return row;
+        }
+
+        // ─── Utilities ───────────────────────────────────────────────────────────
+
+        /**
+         * Append a 16×16 or 20×20 SVG item icon to an element
+         * @param {HTMLElement} parent
+         * @param {string} itemHrid
+         * @param {number} size
+         */
+        appendItemIcon(parent, itemHrid, size = 20) {
+            const spriteUrl = this.getItemsSpriteUrl();
+            if (!spriteUrl) return;
+
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', String(size));
+            svg.setAttribute('height', String(size));
+            svg.style.flexShrink = '0';
+
+            const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+            use.setAttribute('href', `${spriteUrl}#${itemHrid.split('/').pop()}`);
+            svg.appendChild(use);
+            parent.appendChild(svg);
+        }
+
+        /**
+         * Get items sprite URL from DOM (cached)
+         * @returns {string|null}
+         */
+        getItemsSpriteUrl() {
+            if (!this.itemsSpriteUrl) {
+                const el = document.querySelector('use[href*="items_sprite"]');
+                if (el) {
+                    const href = el.getAttribute('href');
+                    this.itemsSpriteUrl = href ? href.split('#')[0] : null;
+                }
+            }
+            return this.itemsSpriteUrl;
+        }
+
+        /**
+         * Get item display name from HRID (cached)
+         * @param {string} itemHrid
+         * @returns {string}
+         */
+        getItemName(itemHrid) {
+            if (this.itemNameCache.has(itemHrid)) {
+                return this.itemNameCache.get(itemHrid);
+            }
+            const details = dataManager.getItemDetails(itemHrid);
+            const name = details?.name || itemHrid.split('/').pop().replace(/_/g, ' ');
+            this.itemNameCache.set(itemHrid, name);
+            return name;
+        }
+
+        /**
+         * Get paginated sessions for current page
+         * @returns {Array}
+         */
+        getPaginatedSessions() {
+            if (this.showAll) return this.filteredSessions;
+            const start = (this.currentPage - 1) * this.rowsPerPage;
+            return this.filteredSessions.slice(start, start + this.rowsPerPage);
+        }
+
+        /**
+         * Get total number of pages
+         * @returns {number}
+         */
+        getTotalPages() {
+            if (this.showAll) return 1;
+            return Math.ceil(this.filteredSessions.length / this.rowsPerPage);
+        }
+
+        /**
+         * Delete a single session by ID
+         * @param {string} sessionId
+         */
+        async deleteSession(sessionId) {
+            this.sessions = this.sessions.filter((s) => s.id !== sessionId);
+
+            try {
+                await coinifyHistoryTracker.deleteSessions(this.sessions);
+            } catch (error) {
+                console.error('[CoinifyHistoryViewer] Failed to delete session:', error);
+            }
+
+            this.applyFilters();
+            this.renderTable();
+        }
+
+        /**
+         * Export all sessions to a CSV file download
+         */
+        exportHistory() {
+            const escape = (val) => `"${String(val === null || val === undefined ? '' : val).replace(/"/g, '""')}"`;
+
+            const headers = [
+                'Session Start',
+                'Input Item',
+                'Enhancement Level',
+                'Attempts',
+                'Successes',
+                'Failures',
+                'Success Rate',
+                'Coins Earned',
+                'Catalyst of Coinification Used',
+                'Prime Catalyst Used',
+            ];
+
+            const rows = this.sessions.map((session) => {
+                const start = new Date(session.startTime).toLocaleString();
+                const inputName = this.getItemName(session.inputItemHrid);
+                const failures = session.totalAttempts - session.totalSuccesses;
+                const rate =
+                    session.totalAttempts > 0
+                        ? `${((session.totalSuccesses / session.totalAttempts) * 100).toFixed(1)}%`
+                        : '—';
+
+                return [
+                    start,
+                    inputName,
+                    session.enhancementLevel,
+                    session.totalAttempts,
+                    session.totalSuccesses,
+                    failures,
+                    rate,
+                    session.totalCoinsEarned || 0,
+                    session.catalystOfCoinificationUsed || 0,
+                    session.primeCatalystUsed || 0,
+                ]
+                    .map(escape)
+                    .join(',');
+            });
+
+            const csv = [headers.map(escape).join(','), ...rows].join('\n');
+            const date = new Date().toISOString().slice(0, 10);
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `coinify-history-${date}.csv`;
+            a.click();
+
+            URL.revokeObjectURL(url);
+        }
+
+        /**
+         * Clear all history after confirmation
+         */
+        async clearHistory() {
+            const confirmed = confirm(
+                `This will permanently delete ALL coinify history (${this.sessions.length} sessions).\nThis cannot be undone.\n\nAre you sure?`
+            );
+            if (!confirmed) return;
+
+            try {
+                await coinifyHistoryTracker.clearHistory();
+                this.sessions = [];
+                this.filteredSessions = [];
+                alert('Coinify history cleared.');
+                this.applyFilters();
+                this.renderTable();
+            } catch (error) {
+                console.error('[CoinifyHistoryViewer] Failed to clear history:', error);
+                alert(`Failed to clear history: ${error.message}`);
+            }
+        }
+    }
+
+    const coinifyHistoryViewer = new CoinifyHistoryViewer();
+
+    var coinifyHistoryViewer$1 = {
+        name: 'Coinify History Viewer',
+        initialize: () => coinifyHistoryViewer.initialize(),
+        cleanup: () => coinifyHistoryViewer.disable(),
+    };
+
+    /**
+     * Enhancement Session Data Structure
+     * Represents a single enhancement tracking session for one item
+     */
+
+    /**
+     * Session states
+     */
+    const SessionState = {
+        TRACKING: 'tracking', // Currently tracking enhancements
+        COMPLETED: 'completed'};
+
+    /**
+     * Create a new enhancement session
+     * @param {string} itemHrid - Item HRID being enhanced
+     * @param {string} itemName - Display name of item
+     * @param {number} startLevel - Starting enhancement level
+     * @param {number} targetLevel - Target enhancement level (1-20)
+     * @param {number} protectFrom - Level to start using protection items (0 = never)
+     * @returns {Object} New session object
+     */
+    function createSession(itemHrid, itemName, startLevel, targetLevel, protectFrom = 0) {
+        const now = Date.now();
+
+        return {
+            // Session metadata
+            id: `session_${now}`,
+            state: SessionState.TRACKING,
+            itemHrid,
+            itemName,
+            startLevel,
+            targetLevel,
+            currentLevel: startLevel,
+            protectFrom,
+
+            // Timestamps
+            startTime: now,
+            lastUpdateTime: now,
+            endTime: null,
+
+            // Last attempt tracking (for detecting success/failure)
+            lastAttempt: {
+                attemptNumber: 0,
+                level: startLevel,
+                timestamp: now,
+            },
+
+            // Attempt tracking (per level)
+            // Format: { 1: { success: 5, fail: 3, successRate: 0.625 }, ... }
+            attemptsPerLevel: {},
+
+            // Cost tracking
+            materialCosts: {}, // Format: { itemHrid: { count: 10, totalCost: 50000 } }
+            coinCost: 0,
+            coinCount: 0, // Track number of times coins were spent
+            protectionCost: 0,
+            protectionCount: 0,
+            protectionItemHrid: null, // Track which protection item is being used
+            totalCost: 0,
+
+            // Statistics
+            totalAttempts: 0,
+            totalSuccesses: 0,
+            totalFailures: 0,
+            totalXP: 0, // Total XP gained from enhancements
+            longestSuccessStreak: 0,
+            longestFailureStreak: 0,
+            currentStreak: { type: null, count: 0 }, // 'success' or 'fail'
+
+            // Milestones reached
+            milestonesReached: [], // [5, 10, 15, 20]
+
+            // Enhancement predictions (optional - calculated at session start)
+            predictions: null, // { expectedAttempts, expectedProtections, ... }
+        };
+    }
+
+    /**
+     * Initialize attempts tracking for a level
+     * @param {Object} session - Session object
+     * @param {number} level - Enhancement level
+     */
+    function initializeLevelTracking(session, level) {
+        if (!session.attemptsPerLevel[level]) {
+            session.attemptsPerLevel[level] = {
+                success: 0,
+                fail: 0,
+                successRate: 0,
+            };
+        }
+    }
+
+    /**
+     * Update success rate for a level
+     * @param {Object} session - Session object
+     * @param {number} level - Enhancement level
+     */
+    function updateSuccessRate(session, level) {
+        const levelData = session.attemptsPerLevel[level];
+        if (!levelData) return;
+
+        const total = levelData.success + levelData.fail;
+        levelData.successRate = total > 0 ? levelData.success / total : 0;
+    }
+
+    /**
+     * Record a successful enhancement attempt
+     * @param {Object} session - Session object
+     * @param {number} previousLevel - Level before enhancement (level that succeeded)
+     * @param {number} newLevel - New level after success
+     */
+    function recordSuccess(session, previousLevel, newLevel) {
+        // Initialize tracking if needed for the level that succeeded
+        initializeLevelTracking(session, previousLevel);
+
+        // Record success at the level we enhanced FROM
+        session.attemptsPerLevel[previousLevel].success++;
+        session.totalAttempts++;
+        session.totalSuccesses++;
+
+        // Update success rate for this level
+        updateSuccessRate(session, previousLevel);
+
+        // Update current level
+        session.currentLevel = newLevel;
+
+        // Update streaks
+        if (session.currentStreak.type === 'success') {
+            session.currentStreak.count++;
+        } else {
+            session.currentStreak = { type: 'success', count: 1 };
+        }
+
+        if (session.currentStreak.count > session.longestSuccessStreak) {
+            session.longestSuccessStreak = session.currentStreak.count;
+        }
+
+        // Check for milestones
+        if ([5, 10, 15, 20].includes(newLevel) && !session.milestonesReached.includes(newLevel)) {
+            session.milestonesReached.push(newLevel);
+        }
+
+        // Update timestamp
+        session.lastUpdateTime = Date.now();
+
+        // Check if target reached
+        if (newLevel >= session.targetLevel) {
+            session.state = SessionState.COMPLETED;
+            session.endTime = Date.now();
+        }
+    }
+
+    /**
+     * Record a failed enhancement attempt
+     * @param {Object} session - Session object
+     * @param {number} previousLevel - Level that failed (level we tried to enhance from)
+     */
+    function recordFailure(session, previousLevel, newLevel) {
+        // Initialize tracking if needed for the level that failed
+        initializeLevelTracking(session, previousLevel);
+
+        // Record failure at the level we enhanced FROM
+        session.attemptsPerLevel[previousLevel].fail++;
+        session.totalAttempts++;
+        session.totalFailures++;
+
+        // Update success rate for this level
+        updateSuccessRate(session, previousLevel);
+
+        // Update current level to actual level after failure
+        session.currentLevel = newLevel;
+
+        // Update streaks
+        if (session.currentStreak.type === 'fail') {
+            session.currentStreak.count++;
+        } else {
+            session.currentStreak = { type: 'fail', count: 1 };
+        }
+
+        if (session.currentStreak.count > session.longestFailureStreak) {
+            session.longestFailureStreak = session.currentStreak.count;
+        }
+
+        // Update timestamp
+        session.lastUpdateTime = Date.now();
+    }
+
+    /**
+     * Add material cost to session
+     * @param {Object} session - Session object
+     * @param {string} itemHrid - Material item HRID
+     * @param {number} count - Quantity used
+     * @param {number} unitCost - Cost per item (from market)
+     */
+    function addMaterialCost(session, itemHrid, count, unitCost) {
+        if (!session.materialCosts[itemHrid]) {
+            session.materialCosts[itemHrid] = {
+                count: 0,
+                totalCost: 0,
+            };
+        }
+
+        session.materialCosts[itemHrid].count += count;
+        session.materialCosts[itemHrid].totalCost += count * unitCost;
+
+        // Update total cost
+        recalculateTotalCost(session);
+    }
+
+    /**
+     * Add coin cost to session
+     * @param {Object} session - Session object
+     * @param {number} amount - Coin amount spent
+     */
+    function addCoinCost(session, amount) {
+        session.coinCost += amount;
+        session.coinCount += 1;
+        recalculateTotalCost(session);
+    }
+
+    /**
+     * Add protection item cost to session
+     * @param {Object} session - Session object
+     * @param {string} protectionItemHrid - Protection item HRID
+     * @param {number} cost - Protection item cost
+     */
+    function addProtectionCost(session, protectionItemHrid, cost) {
+        session.protectionCost += cost;
+        session.protectionCount += 1;
+
+        // Store the protection item HRID if not already set
+        if (!session.protectionItemHrid) {
+            session.protectionItemHrid = protectionItemHrid;
+        }
+
+        recalculateTotalCost(session);
+    }
+
+    /**
+     * Recalculate total cost from all sources
+     * @param {Object} session - Session object
+     */
+    function recalculateTotalCost(session) {
+        const materialTotal = Object.values(session.materialCosts).reduce((sum, m) => sum + m.totalCost, 0);
+
+        session.totalCost = materialTotal + session.coinCost + session.protectionCost;
+    }
+
+    /**
+     * Get session duration in seconds
+     * @param {Object} session - Session object
+     * @returns {number} Duration in seconds
+     */
+    function getSessionDuration(session) {
+        const endTime = session.endTime || Date.now();
+        return Math.floor((endTime - session.startTime) / 1000);
+    }
+
+    /**
+     * Finalize session (mark as completed)
+     * @param {Object} session - Session object
+     */
+    function finalizeSession(session) {
+        session.state = SessionState.COMPLETED;
+        session.endTime = Date.now();
+    }
+
+    /**
+     * Check if session matches given item and level criteria (for resume logic)
+     * @param {Object} session - Session object
+     * @param {string} itemHrid - Item HRID
+     * @param {number} currentLevel - Current enhancement level
+     * @param {number} targetLevel - Target level
+     * @param {number} protectFrom - Protection level
+     * @returns {boolean} True if session matches
+     */
+    function sessionMatches(session, itemHrid, currentLevel, targetLevel, protectFrom = 0) {
+        // Must be same item
+        if (session.itemHrid !== itemHrid) return false;
+
+        // Can only resume tracking sessions (not completed/archived)
+        if (session.state !== SessionState.TRACKING) return false;
+
+        // Must match protection settings exactly (Ultimate Tracker requirement)
+        if (session.protectFrom !== protectFrom) return false;
+
+        // Must match target level exactly (Ultimate Tracker requirement)
+        if (session.targetLevel !== targetLevel) return false;
+
+        // Must match current level (with small tolerance for out-of-order events)
+        const levelDiff = Math.abs(session.currentLevel - currentLevel);
+        if (levelDiff <= 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if a completed session can be extended
+     * @param {Object} session - Session object
+     * @param {string} itemHrid - Item HRID
+     * @param {number} currentLevel - Current enhancement level
+     * @returns {boolean} True if session can be extended
+     */
+    function canExtendSession(session, itemHrid, currentLevel) {
+        // Must be same item
+        if (session.itemHrid !== itemHrid) return false;
+
+        // Must be completed
+        if (session.state !== SessionState.COMPLETED) return false;
+
+        // Current level should match where session ended (or close)
+        const levelDiff = Math.abs(session.currentLevel - currentLevel);
+        if (levelDiff <= 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Extend a completed session to a new target level
+     * @param {Object} session - Session object
+     * @param {number} newTargetLevel - New target level
+     */
+    function extendSession(session, newTargetLevel) {
+        session.state = SessionState.TRACKING;
+        session.targetLevel = newTargetLevel;
+        session.endTime = null;
+        session.lastUpdateTime = Date.now();
+    }
+
+    /**
+     * Validate session data integrity
+     * @param {Object} session - Session object
+     * @returns {boolean} True if valid
+     */
+    function validateSession(session) {
+        if (!session || typeof session !== 'object') return false;
+
+        // Required fields
+        if (!session.id || !session.itemHrid || !session.itemName) return false;
+        if (typeof session.startLevel !== 'number' || typeof session.targetLevel !== 'number') return false;
+        if (typeof session.currentLevel !== 'number') return false;
+
+        // Validate level ranges
+        if (session.startLevel < 0 || session.startLevel > 20) return false;
+        if (session.targetLevel < 1 || session.targetLevel > 20) return false;
+        if (session.currentLevel < 0 || session.currentLevel > 20) return false;
+
+        // Validate costs are non-negative
+        if (session.totalCost < 0 || session.coinCost < 0 || session.protectionCost < 0) return false;
+
+        return true;
+    }
+
+    /**
+     * Enhancement Tracker Storage
+     * Handles persistence of enhancement sessions using IndexedDB
+     */
+
+
+    const STORAGE_KEY = 'enhancementTracker_sessions';
+    const CURRENT_SESSION_KEY = 'enhancementTracker_currentSession';
+    const STORAGE_STORE = 'settings'; // Use existing 'settings' store
+
+    /**
+     * Save all sessions to storage
+     * @param {Object} sessions - Sessions object (keyed by session ID)
+     * @returns {Promise<void>}
+     */
+    async function saveSessions(sessions) {
+        try {
+            await storage.setJSON(STORAGE_KEY, sessions, STORAGE_STORE, true); // immediate=true for rapid updates
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    /**
+     * Load all sessions from storage
+     * @returns {Promise<Object>} Sessions object (keyed by session ID)
+     */
+    async function loadSessions() {
+        try {
+            const sessions = await storage.getJSON(STORAGE_KEY, STORAGE_STORE, {});
+            return sessions;
+        } catch (error) {
+            console.error('[EnhancementStorage] Failed to load sessions:', error);
+            return {};
+        }
+    }
+
+    /**
+     * Save current session ID
+     * @param {string|null} sessionId - Current session ID (null if no active session)
+     * @returns {Promise<void>}
+     */
+    async function saveCurrentSessionId(sessionId) {
+        try {
+            await storage.set(CURRENT_SESSION_KEY, sessionId, STORAGE_STORE, true); // immediate=true for rapid updates
+        } catch (error) {
+            console.error('[EnhancementStorage] Failed to save current session ID:', error);
+        }
+    }
+
+    /**
+     * Load current session ID
+     * @returns {Promise<string|null>} Current session ID or null
+     */
+    async function loadCurrentSessionId() {
+        try {
+            return await storage.get(CURRENT_SESSION_KEY, STORAGE_STORE, null);
+        } catch (error) {
+            console.error('[EnhancementStorage] Failed to load current session ID:', error);
+            return null;
+        }
+    }
+
+    /**
+     * Enhancement XP Calculations
+     * Based on Ultimate Enhancement Tracker formulas
+     */
+
+
+    /**
+     * Get base item level from item HRID
+     * @param {string} itemHrid - Item HRID
+     * @returns {number} Base item level
+     */
+    function getBaseItemLevel(itemHrid) {
+        try {
+            const gameData = dataManager.getInitClientData();
+            const itemData = gameData?.itemDetailMap?.[itemHrid];
+
+            // First try direct level field (works for consumables, resources, etc.)
+            if (itemData?.level) {
+                return itemData.level;
+            }
+
+            // For equipment, check levelRequirements array
+            if (itemData?.equipmentDetail?.levelRequirements?.length > 0) {
+                // Return the level from the first requirement (highest requirement)
+                return itemData.equipmentDetail.levelRequirements[0].level;
+            }
+
+            return 0;
+        } catch {
+            return 0;
+        }
+    }
+
+    /**
+     * Get wisdom buff percentage from all sources
+     * Reads from dataManager.characterData (NOT localStorage)
+     * @returns {number} Wisdom buff as decimal (e.g., 0.20 for 20%)
+     */
+    function getWisdomBuff() {
+        try {
+            // Use dataManager for character data (NOT localStorage)
+            const charData = dataManager.characterData;
+            if (!charData) return 0;
+
+            let totalFlatBoost = 0;
+
+            // 1. Community Buffs
+            const communityEnhancingBuffs = charData.communityActionTypeBuffsMap?.['/action_types/enhancing'];
+            if (Array.isArray(communityEnhancingBuffs)) {
+                communityEnhancingBuffs.forEach((buff) => {
+                    if (buff.typeHrid === '/buff_types/wisdom') {
+                        totalFlatBoost += buff.flatBoost || 0;
+                    }
+                });
+            }
+
+            // 2. Equipment Buffs
+            const equipmentEnhancingBuffs = charData.equipmentActionTypeBuffsMap?.['/action_types/enhancing'];
+            if (Array.isArray(equipmentEnhancingBuffs)) {
+                equipmentEnhancingBuffs.forEach((buff) => {
+                    if (buff.typeHrid === '/buff_types/wisdom') {
+                        totalFlatBoost += buff.flatBoost || 0;
+                    }
+                });
+            }
+
+            // 3. House Buffs
+            const houseEnhancingBuffs = charData.houseActionTypeBuffsMap?.['/action_types/enhancing'];
+            if (Array.isArray(houseEnhancingBuffs)) {
+                houseEnhancingBuffs.forEach((buff) => {
+                    if (buff.typeHrid === '/buff_types/wisdom') {
+                        totalFlatBoost += buff.flatBoost || 0;
+                    }
+                });
+            }
+
+            // 4. Consumable Buffs (from wisdom tea, etc.)
+            const consumableEnhancingBuffs = charData.consumableActionTypeBuffsMap?.['/action_types/enhancing'];
+            if (Array.isArray(consumableEnhancingBuffs)) {
+                consumableEnhancingBuffs.forEach((buff) => {
+                    if (buff.typeHrid === '/buff_types/wisdom') {
+                        totalFlatBoost += buff.flatBoost || 0;
+                    }
+                });
+            }
+
+            // 5. Achievement Buffs
+            totalFlatBoost += dataManager.getAchievementBuffFlatBoost('/action_types/enhancing', '/buff_types/wisdom');
+
+            // Return as decimal (flatBoost is already in decimal form, e.g., 0.2 for 20%)
+            return totalFlatBoost;
+        } catch {
+            return 0;
+        }
+    }
+
+    /**
+     * Calculate XP gained from successful enhancement
+     * Formula: 1.4 × (1 + wisdom) × enhancementMultiplier × (10 + baseItemLevel)
+     * @param {number} previousLevel - Enhancement level before success
+     * @param {string} itemHrid - Item HRID
+     * @returns {number} XP gained
+     */
+    function calculateSuccessXP(previousLevel, itemHrid) {
+        const baseLevel = getBaseItemLevel(itemHrid);
+        const wisdomBuff = getWisdomBuff();
+
+        // Special handling for enhancement level 0 (base items)
+        const enhancementMultiplier =
+            previousLevel === 0
+                ? 1.0 // Base value for unenhanced items
+                : previousLevel + 1; // Normal progression
+
+        return Math.floor(1.4 * (1 + wisdomBuff) * enhancementMultiplier * (10 + baseLevel));
+    }
+
+    /**
+     * Calculate XP gained from failed enhancement
+     * Formula: 10% of success XP
+     * @param {number} previousLevel - Enhancement level that failed
+     * @param {string} itemHrid - Item HRID
+     * @returns {number} XP gained
+     */
+    function calculateFailureXP(previousLevel, itemHrid) {
+        return Math.floor(calculateSuccessXP(previousLevel, itemHrid) * 0.1);
+    }
+
+    /**
+     * Calculate adjusted attempt number from session data
+     * This makes tracking resume-proof (doesn't rely on WebSocket currentCount)
+     * @param {Object} session - Session object
+     * @returns {number} Next attempt number
+     */
+    function calculateAdjustedAttemptCount(session) {
+        let successCount = 0;
+        let failCount = 0;
+
+        // Sum all successes and failures across all levels
+        for (const level in session.attemptsPerLevel) {
+            const levelData = session.attemptsPerLevel[level];
+            successCount += levelData.success || 0;
+            failCount += levelData.fail || 0;
+        }
+
+        // For the first attempt, return 1
+        if (successCount === 0 && failCount === 0) {
+            return 1;
+        }
+
+        // Return total + 1 for the next attempt
+        return successCount + failCount + 1;
+    }
+
+    /**
+     * Calculate enhancing action time from the game's buff maps
+     * Reads the pre-computed action_speed flatBoost values from all buff sources
+     * and adds level advantage, matching the game's actual speed calculation
+     * @param {string} itemHrid - Item HRID being enhanced
+     * @returns {number} Per-action time in seconds
+     */
+    function getEnhancingActionTime(itemHrid) {
+        try {
+            const charData = dataManager.characterData;
+            if (!charData) return 12;
+
+            // Get base time from game data
+            const actionDetails = dataManager.getActionDetails('/actions/enhancing/enhance');
+            const baseTime = actionDetails?.baseTimeCost ? actionDetails.baseTimeCost / 1e9 : 12;
+
+            // Get enhancing skill level
+            const enhancingSkill = charData.characterSkills?.find((s) => s.skillHrid === '/skills/enhancing');
+            const baseLevel = enhancingSkill?.level || 1;
+
+            // Get tea level bonus from consumable buff map
+            let teaLevelBonus = 0;
+            const consumableBuffs = charData.consumableActionTypeBuffsMap?.['/action_types/enhancing'];
+            if (Array.isArray(consumableBuffs)) {
+                for (const buff of consumableBuffs) {
+                    if (buff.typeHrid === '/buff_types/enhancing_level') {
+                        teaLevelBonus = buff.flatBoost || 0;
+                    }
+                }
+            }
+
+            // Sum action_speed flatBoost from ALL buff sources (equipment, house, community, tea)
+            let totalSpeedBuff = 0;
+
+            const buffMaps = [
+                charData.equipmentActionTypeBuffsMap,
+                charData.houseActionTypeBuffsMap,
+                charData.communityActionTypeBuffsMap,
+                charData.consumableActionTypeBuffsMap,
+            ];
+
+            for (const buffMap of buffMaps) {
+                const enhancingBuffs = buffMap?.['/action_types/enhancing'];
+                if (!Array.isArray(enhancingBuffs)) continue;
+
+                for (const buff of enhancingBuffs) {
+                    if (buff.typeHrid === '/buff_types/action_speed') {
+                        totalSpeedBuff += buff.flatBoost || 0;
+                    }
+                }
+            }
+
+            // Add personal buffs (Labyrinth seals)
+            totalSpeedBuff += dataManager.getPersonalBuffFlatBoost('/action_types/enhancing', '/buff_types/action_speed');
+
+            // Add level advantage: (effectiveLevel - itemLevel) / 100
+            const effectiveLevel = baseLevel + teaLevelBonus;
+            const itemLevel = getBaseItemLevel(itemHrid);
+            if (effectiveLevel > itemLevel) {
+                totalSpeedBuff += (effectiveLevel - itemLevel) / 100;
+            }
+
+            return Math.max(profitConstants_js.MIN_ACTION_TIME_SECONDS, baseTime / (1 + totalSpeedBuff));
+        } catch {
+            return 12;
+        }
+    }
+
+    /**
+     * Calculate enhancement predictions using character stats
+     * @param {string} itemHrid - Item HRID being enhanced
+     * @param {number} startLevel - Starting enhancement level
+     * @param {number} targetLevel - Target enhancement level
+     * @param {number} protectFrom - Level to start using protection
+     * @returns {Object|null} Prediction data or null if cannot calculate
+     */
+    function calculateEnhancementPredictions(itemHrid, startLevel, targetLevel, protectFrom) {
+        try {
+            // Get item level
+            const itemLevel = getBaseItemLevel(itemHrid);
+
+            // Use getEnhancingParams() for all character stats (level, speed, success, teas, etc.)
+            const params = enhancementConfig_js.getEnhancingParams();
+
+            // Check for blessed tea
+            const hasBlessed = params.teas?.blessed || false;
+
+            // Calculate predictions (Markov chain for attempts, protections, success rates)
+            const result = enhancementCalculator_js.calculateEnhancement({
+                enhancingLevel: params.enhancingLevel,
+                houseLevel: params.houseLevel,
+                toolBonus: params.toolBonus,
+                speedBonus: params.speedBonus,
+                itemLevel,
+                targetLevel,
+                startLevel,
+                protectFrom,
+                blessedTea: hasBlessed,
+                guzzlingBonus: params.guzzlingBonus,
+            });
+
+            if (!result) {
+                return null;
+            }
+
+            // Calculate per-action time from the game's buff maps (authoritative source)
+            // instead of the hardcoded formula in calculateEnhancement
+            const perActionTime = getEnhancingActionTime(itemHrid);
+
+            return {
+                expectedAttempts: Math.round(result.attemptsRounded),
+                expectedProtections: Math.round(result.protectionCount),
+                expectedTime: perActionTime * result.attempts,
+                perActionTime,
+                successMultiplier: result.successMultiplier,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Enhancement Tracker
+     * Main tracker class for monitoring enhancement attempts, costs, and statistics
+     */
+
+
+    /**
+     * EnhancementTracker class manages enhancement tracking sessions
+     */
+    class EnhancementTracker {
+        constructor() {
+            this.sessions = {}; // All sessions (keyed by session ID)
+            this.currentSessionId = null; // Currently active session ID
+            this.isInitialized = false;
+            this.pendingSessionStart = false; // Start new session on next action_completed regardless of currentCount
+        }
+
+        /**
+         * Initialize enhancement tracker
+         * @returns {Promise<void>}
+         */
+        async initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            if (!config.getSetting('enhancementTracker')) {
+                return;
+            }
+
+            try {
+                // Load sessions from storage
+                this.sessions = await loadSessions();
+                this.currentSessionId = await loadCurrentSessionId();
+
+                // Validate current session still exists
+                if (this.currentSessionId && !this.sessions[this.currentSessionId]) {
+                    this.currentSessionId = null;
+                    await saveCurrentSessionId(null);
+                }
+
+                // Validate all loaded sessions
+                for (const [sessionId, session] of Object.entries(this.sessions)) {
+                    if (!validateSession(session)) {
+                        delete this.sessions[sessionId];
+                    }
+                }
+
+                this.isInitialized = true;
+            } catch (error) {
+                console.error('[EnhancementTracker] Failed to initialize:', error);
+            }
+        }
+
+        /**
+         * Start a new enhancement session
+         * @param {string} itemHrid - Item HRID being enhanced
+         * @param {number} startLevel - Starting enhancement level
+         * @param {number} targetLevel - Target enhancement level
+         * @param {number} protectFrom - Level to start using protection (0 = never)
+         * @returns {Promise<string>} New session ID
+         */
+        async startSession(itemHrid, startLevel, targetLevel, protectFrom = 0) {
+            const gameData = dataManager.getInitClientData();
+            if (!gameData) {
+                throw new Error('Game data not available');
+            }
+
+            // Get item name
+            const itemDetails = gameData.itemDetailMap[itemHrid];
+            if (!itemDetails) {
+                throw new Error(`Item not found: ${itemHrid}`);
+            }
+
+            const itemName = itemDetails.name;
+
+            // Create new session
+            const session = createSession(itemHrid, itemName, startLevel, targetLevel, protectFrom);
+
+            // Calculate predictions
+            const predictions = calculateEnhancementPredictions(itemHrid, startLevel, targetLevel, protectFrom);
+            session.predictions = predictions;
+
+            // Store session
+            this.sessions[session.id] = session;
+            this.currentSessionId = session.id;
+
+            // Save to storage
+            await saveSessions(this.sessions);
+            await saveCurrentSessionId(session.id);
+
+            return session.id;
+        }
+
+        /**
+         * Find a matching previous session that can be resumed
+         * @param {string} itemHrid - Item HRID
+         * @param {number} currentLevel - Current enhancement level
+         * @param {number} targetLevel - Target level
+         * @param {number} protectFrom - Protection level
+         * @returns {string|null} Session ID if found, null otherwise
+         */
+        findMatchingSession(itemHrid, currentLevel, targetLevel, protectFrom = 0) {
+            for (const [sessionId, session] of Object.entries(this.sessions)) {
+                if (sessionMatches(session, itemHrid, currentLevel, targetLevel, protectFrom)) {
+                    return sessionId;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Resume an existing session
+         * @param {string} sessionId - Session ID to resume
+         * @returns {Promise<boolean>} True if resumed successfully
+         */
+        async resumeSession(sessionId) {
+            if (!this.sessions[sessionId]) {
+                return false;
+            }
+
+            const session = this.sessions[sessionId];
+
+            // Can only resume tracking sessions
+            if (session.state !== SessionState.TRACKING) {
+                return false;
+            }
+
+            this.currentSessionId = sessionId;
+            await saveCurrentSessionId(sessionId);
+
+            return true;
+        }
+
+        /**
+         * Find a completed session that can be extended
+         * @param {string} itemHrid - Item HRID
+         * @param {number} currentLevel - Current enhancement level
+         * @returns {string|null} Session ID if found, null otherwise
+         */
+        findExtendableSession(itemHrid, currentLevel) {
+            for (const [sessionId, session] of Object.entries(this.sessions)) {
+                if (canExtendSession(session, itemHrid, currentLevel)) {
+                    return sessionId;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Extend a completed session to a new target level
+         * @param {string} sessionId - Session ID to extend
+         * @param {number} newTargetLevel - New target level
+         * @returns {Promise<boolean>} True if extended successfully
+         */
+        async extendSessionTarget(sessionId, newTargetLevel) {
+            if (!this.sessions[sessionId]) {
+                return false;
+            }
+
+            const session = this.sessions[sessionId];
+
+            // Can only extend completed sessions
+            if (session.state !== SessionState.COMPLETED) {
+                return false;
+            }
+
+            extendSession(session, newTargetLevel);
+            this.currentSessionId = sessionId;
+
+            // Recalculate predictions for the new target level
+            const predictions = calculateEnhancementPredictions(
+                session.itemHrid,
+                session.currentLevel,
+                newTargetLevel,
+                session.protectFrom
+            );
+            if (predictions) {
+                session.predictions = predictions;
+            }
+
+            await saveSessions(this.sessions);
+            await saveCurrentSessionId(sessionId);
+
+            return true;
+        }
+
+        /**
+         * Get current active session
+         * @returns {Object|null} Current session or null
+         */
+        getCurrentSession() {
+            if (!this.currentSessionId) return null;
+            return this.sessions[this.currentSessionId] || null;
+        }
+
+        /**
+         * Finalize current session (mark as completed)
+         * @returns {Promise<void>}
+         */
+        async finalizeCurrentSession() {
+            const session = this.getCurrentSession();
+            if (!session) {
+                return;
+            }
+
+            finalizeSession(session);
+            await saveSessions(this.sessions);
+
+            // Clear current session
+            this.currentSessionId = null;
+            await saveCurrentSessionId(null);
+        }
+
+        /**
+         * Record a successful enhancement attempt
+         * @param {number} previousLevel - Level before success
+         * @param {number} newLevel - New level after success
+         * @returns {Promise<void>}
+         */
+        async recordSuccess(previousLevel, newLevel) {
+            const session = this.getCurrentSession();
+            if (!session) {
+                return;
+            }
+
+            recordSuccess(session, previousLevel, newLevel);
+            await saveSessions(this.sessions);
+
+            // Check if target reached
+            if (session.state === SessionState.COMPLETED) {
+                this.currentSessionId = null;
+                await saveCurrentSessionId(null);
+            }
+        }
+
+        /**
+         * Record a failed enhancement attempt
+         * @param {number} previousLevel - Level that failed
+         * @param {number} newLevel - Actual level after failure
+         * @returns {Promise<void>}
+         */
+        async recordFailure(previousLevel, newLevel) {
+            const session = this.getCurrentSession();
+            if (!session) {
+                return;
+            }
+
+            recordFailure(session, previousLevel, newLevel);
+            await saveSessions(this.sessions);
+        }
+
+        /**
+         * Track material costs for current session
+         * @param {string} itemHrid - Material item HRID
+         * @param {number} count - Quantity used
+         * @returns {Promise<void>}
+         */
+        async trackMaterialCost(itemHrid, count) {
+            const session = this.getCurrentSession();
+            if (!session) return;
+
+            // Get market price
+            const priceData = marketAPI.getPrice(itemHrid, 0);
+            const unitCost = priceData ? priceData.ask || priceData.bid || 0 : 0;
+
+            addMaterialCost(session, itemHrid, count, unitCost);
+            await saveSessions(this.sessions);
+        }
+
+        /**
+         * Track coin cost for current session
+         * @param {number} amount - Coin amount spent
+         * @returns {Promise<void>}
+         */
+        async trackCoinCost(amount) {
+            const session = this.getCurrentSession();
+            if (!session) return;
+
+            addCoinCost(session, amount);
+            await saveSessions(this.sessions);
+        }
+
+        /**
+         * Track protection item cost for current session
+         * @param {string} protectionItemHrid - Protection item HRID
+         * @param {number} cost - Protection item cost
+         * @returns {Promise<void>}
+         */
+        async trackProtectionCost(protectionItemHrid, cost) {
+            const session = this.getCurrentSession();
+            if (!session) return;
+
+            addProtectionCost(session, protectionItemHrid, cost);
+            await saveSessions(this.sessions);
+        }
+
+        /**
+         * Get all sessions
+         * @returns {Object} All sessions
+         */
+        getAllSessions() {
+            return this.sessions;
+        }
+
+        /**
+         * Get session by ID
+         * @param {string} sessionId - Session ID
+         * @returns {Object|null} Session or null
+         */
+        getSession(sessionId) {
+            return this.sessions[sessionId] || null;
+        }
+
+        /**
+         * Save sessions to storage (can be called directly)
+         * @returns {Promise<void>}
+         */
+        async saveSessions() {
+            await saveSessions(this.sessions);
+        }
+
+        /**
+         * Set flag so the next action_completed starts a new session regardless of currentCount.
+         * Used when the tracker is cleared mid-session or when a new action queue is detected.
+         */
+        setPendingStart() {
+            this.pendingSessionStart = true;
+        }
+
+        /**
+         * Clear all sessions and flag that the next attempt should start a new session.
+         * @returns {Promise<void>}
+         */
+        async clearSessions() {
+            this.sessions = {};
+            this.currentSessionId = null;
+            this.pendingSessionStart = true;
+            await saveSessions(this.sessions);
+            await saveCurrentSessionId(null);
+        }
+
+        /**
+         * Disable and cleanup
+         */
+        disable() {
+            // Clear in-memory session data (will be reloaded from storage on next init)
+            this.sessions = {};
+            this.currentSessionId = null;
+            this.isInitialized = false;
+        }
+    }
+
+    const enhancementTracker = new EnhancementTracker();
+
+    /**
+     * Enhancement Tracker Floating UI
+     * Displays enhancement session statistics in a draggable panel
+     * Based on Ultimate Enhancement Tracker v3.7.9
+     */
+
+
+    // UI Style Constants (matching Ultimate Enhancement Tracker)
+    const STYLE = {
+        colors: {
+            primary: '#00ffe7',
+            border: 'rgba(0, 255, 234, 0.4)',
+            textPrimary: '#e0f7ff',
+            textSecondary: '#9b9bff',
+            accent: '#ff00d4',
+            danger: '#ff0055',
+            success: '#00ff99',
+            headerBg: 'rgba(15, 5, 35, 0.7)',
+            gold: '#FFD700',
+        },
+        borderRadius: {
+            medium: '8px'},
+        transitions: {
+            fast: 'all 0.15s ease'},
+    };
+
+    // Table styling
+    const compactTableStyle = `
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 0;
+`;
+
+    const compactHeaderStyle = `
+    padding: 4px 6px;
+    background: ${STYLE.colors.headerBg};
+    border: 1px solid ${STYLE.colors.border};
+    color: ${STYLE.colors.textPrimary};
+    font-weight: bold;
+    text-align: center;
+`;
+
+    const compactCellStyle = `
+    padding: 3px 6px;
+    border: 1px solid rgba(0, 255, 234, 0.2);
+    color: ${STYLE.colors.textPrimary};
+`;
+
+    /**
+     * Enhancement UI Manager
+     */
+    class EnhancementUI {
+        constructor() {
+            this.floatingUI = null;
+            this.currentViewingIndex = 0; // Index in sessions array
+            this.updateDebounce = null;
+            this.isDragging = false;
+            this.unregisterScreenObserver = null;
+            this.panelRemovalObserver = null;
+            this.settingChangeHandlers = [];
+            this.isOnEnhancingScreen = false;
+            this.isCollapsed = false; // Track collapsed state
+            this.updateInterval = null;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+            this.dragHandle = null;
+            this.dragMouseDownHandler = null;
+            this.dragMoveHandler = null;
+            this.dragUpHandler = null;
+        }
+
+        /**
+         * Initialize the UI
+         */
+        initialize() {
+            this.createFloatingUI();
+            this.updateUI();
+
+            // Set up screen observer for visibility control
+            this.setupScreenObserver();
+
+            // Update UI every second during active sessions
+            this.updateInterval = setInterval(() => {
+                const session = this.getCurrentSession();
+                if (session && session.state === SessionState.TRACKING) {
+                    this.updateUI();
+                }
+            }, 1000);
+            this.timerRegistry.registerInterval(this.updateInterval);
+        }
+
+        /**
+         * Set up screen observer to detect Enhancing screen using centralized observer
+         */
+        setupScreenObserver() {
+            // Check if main feature is enabled
+            const trackerEnabled = config.getSetting('enhancementTracker');
+
+            if (!trackerEnabled) {
+                // Main feature disabled, hide tracker
+                this.hide();
+            } else {
+                // Check if setting is enabled (default to false if undefined)
+                const showOnlyOnEnhancingScreen = config.getSetting('enhancementTracker_showOnlyOnEnhancingScreen');
+
+                if (showOnlyOnEnhancingScreen !== true) {
+                    // Setting is disabled or undefined, always show tracker
+                    this.isOnEnhancingScreen = true;
+                    this.show();
+                } else {
+                    // Setting enabled, check current screen
+                    this.checkEnhancingScreen();
+                    this.updateVisibility();
+                }
+            }
+
+            // Register with centralized DOM observer for enhancing panel detection
+            this.unregisterScreenObserver = domObserver.onClass(
+                'EnhancementUI-ScreenDetection',
+                'EnhancingPanel_enhancingPanel',
+                (panel) => {
+                    this.isOnEnhancingScreen = true;
+                    this.updateVisibility();
+                    // Setup removal observer when panel appears
+                    this.setupPanelRemovalObserver(panel);
+                },
+                { debounce: false }
+            );
+
+            // Setup setting change listeners (event-driven, no polling)
+            this.setupSettingChangeListeners();
+
+            // Check if panel already exists and setup removal observer
+            const existingPanel = document.querySelector('[class*="EnhancingPanel_enhancingPanel"]');
+            if (existingPanel) {
+                this.isOnEnhancingScreen = true;
+                this.updateVisibility();
+                this.setupPanelRemovalObserver(existingPanel);
+            }
+        }
+
+        /**
+         * Setup listeners for setting changes (replaces polling)
+         */
+        setupSettingChangeListeners() {
+            // Listen for main tracker toggle
+            const onTrackerChange = (enabled) => {
+                if (!enabled) {
+                    this.hide();
+                } else {
+                    this.updateVisibility();
+                }
+            };
+            config.onSettingChange('enhancementTracker', onTrackerChange);
+            this.settingChangeHandlers.push({ key: 'enhancementTracker', handler: onTrackerChange });
+
+            // Listen for "show only on enhancing screen" toggle
+            const onScreenSettingChange = (enabled) => {
+                if (enabled !== true) {
+                    // Setting disabled - always show (if main tracker enabled)
+                    this.isOnEnhancingScreen = true;
+                } else {
+                    // Setting enabled - check actual screen
+                    this.checkEnhancingScreen();
+                }
+                this.updateVisibility();
+            };
+            config.onSettingChange('enhancementTracker_showOnlyOnEnhancingScreen', onScreenSettingChange);
+            this.settingChangeHandlers.push({
+                key: 'enhancementTracker_showOnlyOnEnhancingScreen',
+                handler: onScreenSettingChange,
+            });
+        }
+
+        /**
+         * Setup observer to detect when enhancing panel is removed from DOM
+         * @param {HTMLElement} panel - The enhancing panel element
+         */
+        setupPanelRemovalObserver(panel) {
+            // Disconnect existing observer if any
+            if (this.panelRemovalObserver) {
+                this.panelRemovalObserver.disconnect();
+            }
+
+            // Find MainPanel_mainPanel (grandparent) - the container itself gets replaced on navigation
+            const subPanelContainer = panel.parentElement;
+            const mainPanel = subPanelContainer?.parentElement;
+
+            if (!mainPanel || !mainPanel.className?.includes?.('MainPanel_mainPanel')) {
+                // Fallback: find by class
+                const fallbackMainPanel = document.querySelector('[class*="MainPanel_mainPanel"]');
+                if (!fallbackMainPanel) {
+                    return;
+                }
+                this.observeMainPanelForNavigation(fallbackMainPanel);
+            } else {
+                this.observeMainPanelForNavigation(mainPanel);
+            }
+        }
+
+        /**
+         * Observe MainPanel_mainPanel for navigation (subPanelContainer removal)
+         * @param {HTMLElement} mainPanel - The main panel element to observe
+         */
+        observeMainPanelForNavigation(mainPanel) {
+            this.panelRemovalObserver = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
+                        for (const node of mutation.removedNodes) {
+                            // Check if subPanelContainer was removed (contains the enhancing panel)
+                            if (
+                                node.nodeType === Node.ELEMENT_NODE &&
+                                node.className?.includes?.('MainPanel_subPanelContainer')
+                            ) {
+                                // Check if EnhancingPanel was inside the removed container
+                                const hadEnhancingPanel = node.querySelector('[class*="EnhancingPanel_enhancingPanel"]');
+                                if (hadEnhancingPanel) {
+                                    this.isOnEnhancingScreen = false;
+                                    this.updateVisibility();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            this.panelRemovalObserver.observe(mainPanel, {
+                childList: true,
+            });
+        }
+
+        /**
+         * Check if currently on Enhancing screen
+         */
+        checkEnhancingScreen() {
+            const enhancingPanel = document.querySelector('[class*="EnhancingPanel_enhancingPanel"]');
+            const wasOnEnhancingScreen = this.isOnEnhancingScreen;
+            this.isOnEnhancingScreen = !!enhancingPanel;
+
+            if (wasOnEnhancingScreen !== this.isOnEnhancingScreen) {
+                this.updateVisibility();
+            }
+        }
+
+        /**
+         * Update visibility based on screen state and settings
+         */
+        updateVisibility() {
+            const trackerEnabled = config.getSetting('enhancementTracker');
+            const showOnlyOnEnhancingScreen = config.getSetting('enhancementTracker_showOnlyOnEnhancingScreen');
+
+            // If main tracker is disabled, always hide
+            if (!trackerEnabled) {
+                this.hide();
+            } else if (showOnlyOnEnhancingScreen !== true) {
+                this.show();
+            } else if (this.isOnEnhancingScreen) {
+                this.show();
+            } else {
+                this.hide();
+            }
+        }
+
+        /**
+         * Get currently viewed session
+         */
+        getCurrentSession() {
+            const sessions = Object.values(enhancementTracker.getAllSessions());
+            if (sessions.length === 0) return null;
+
+            // Ensure index is valid
+            if (this.currentViewingIndex >= sessions.length) {
+                this.currentViewingIndex = sessions.length - 1;
+            }
+            if (this.currentViewingIndex < 0) {
+                this.currentViewingIndex = 0;
+            }
+
+            return sessions[this.currentViewingIndex];
+        }
+
+        /**
+         * Switch viewing to a specific session by ID
+         * @param {string} sessionId - Session ID to view
+         */
+        switchToSession(sessionId) {
+            const sessions = Object.values(enhancementTracker.getAllSessions());
+            const index = sessions.findIndex((session) => session.id === sessionId);
+
+            if (index !== -1) {
+                this.currentViewingIndex = index;
+            }
+        }
+
+        /**
+         * Create the floating UI panel
+         */
+        createFloatingUI() {
+            if (this.floatingUI && document.body.contains(this.floatingUI)) {
+                return this.floatingUI;
+            }
+
+            // Main container
+            this.floatingUI = document.createElement('div');
+            this.floatingUI.id = 'enhancementFloatingUI';
+            Object.assign(this.floatingUI.style, {
+                position: 'fixed',
+                top: '50px',
+                right: '50px',
+                zIndex: '9998',
+                fontSize: '14px',
+                padding: '0',
+                borderRadius: STYLE.borderRadius.medium,
+                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.6)',
+                overflow: 'hidden',
+                width: '350px',
+                minHeight: 'auto',
+                background: 'rgba(25, 0, 35, 0.92)',
+                backdropFilter: 'blur(12px)',
+                border: `1px solid ${STYLE.colors.primary}`,
+                color: STYLE.colors.textPrimary,
+                display: 'flex',
+                flexDirection: 'column',
+                transition: 'width 0.2s ease',
+            });
+
+            // Create header
+            const header = this.createHeader();
+            this.floatingUI.appendChild(header);
+
+            // Create content area
+            const content = document.createElement('div');
+            content.id = 'enhancementPanelContent';
+            content.style.padding = '15px';
+            content.style.flexGrow = '1';
+            content.style.overflow = 'auto';
+            content.style.transition = 'max-height 0.2s ease, opacity 0.2s ease';
+            content.style.maxHeight = '600px';
+            content.style.opacity = '1';
+            this.floatingUI.appendChild(content);
+
+            // Make draggable
+            this.makeDraggable(header);
+
+            // Add to page
+            document.body.appendChild(this.floatingUI);
+
+            return this.floatingUI;
+        }
+
+        /**
+         * Create header with title and navigation
+         */
+        createHeader() {
+            const header = document.createElement('div');
+            header.id = 'enhancementPanelHeader';
+            Object.assign(header.style, {
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                cursor: 'move',
+                padding: '10px 15px',
+                background: STYLE.colors.headerBg,
+                borderBottom: `1px solid ${STYLE.colors.border}`,
+                userSelect: 'none',
+                flexShrink: '0',
+            });
+
+            // Title with session counter
+            const titleContainer = document.createElement('div');
+            titleContainer.style.display = 'flex';
+            titleContainer.style.alignItems = 'center';
+            titleContainer.style.gap = '10px';
+            titleContainer.style.overflow = 'hidden';
+            titleContainer.style.minWidth = '0';
+            titleContainer.style.textOverflow = 'ellipsis';
+
+            const title = document.createElement('span');
+            title.textContent = 'Enhancement Tracker';
+            title.style.fontWeight = 'bold';
+
+            const sessionCounter = document.createElement('span');
+            sessionCounter.id = 'enhancementSessionCounter';
+            sessionCounter.style.fontSize = '12px';
+            sessionCounter.style.opacity = '0.7';
+            sessionCounter.style.marginLeft = '5px';
+
+            titleContainer.appendChild(title);
+            titleContainer.appendChild(sessionCounter);
+
+            // Navigation container
+            const navContainer = document.createElement('div');
+            Object.assign(navContainer.style, {
+                display: 'flex',
+                gap: '5px',
+                alignItems: 'center',
+                marginLeft: 'auto',
+                flexShrink: '0',
+            });
+
+            // Previous session button
+            const prevButton = this.createNavButton('◀', () => this.navigateSession(-1));
+
+            // Next session button
+            const nextButton = this.createNavButton('▶', () => this.navigateSession(1));
+
+            // Collapse button
+            const collapseButton = this.createCollapseButton();
+
+            // Clear sessions button
+            const clearButton = this.createClearButton();
+
+            navContainer.appendChild(prevButton);
+            navContainer.appendChild(nextButton);
+            navContainer.appendChild(collapseButton);
+            navContainer.appendChild(clearButton);
+
+            header.appendChild(titleContainer);
+            header.appendChild(navContainer);
+
+            return header;
+        }
+
+        /**
+         * Create navigation button
+         */
+        createNavButton(text, onClick) {
+            const button = document.createElement('button');
+            button.textContent = text;
+            Object.assign(button.style, {
+                background: 'none',
+                border: 'none',
+                color: STYLE.colors.textPrimary,
+                cursor: 'pointer',
+                fontSize: '14px',
+                padding: '2px 8px',
+                borderRadius: '3px',
+                transition: STYLE.transitions.fast,
+            });
+
+            button.addEventListener('mouseover', () => {
+                button.style.color = STYLE.colors.accent;
+                button.style.background = 'rgba(255, 0, 212, 0.1)';
+            });
+            button.addEventListener('mouseout', () => {
+                button.style.color = STYLE.colors.textPrimary;
+                button.style.background = 'none';
+            });
+            button.addEventListener('click', onClick);
+
+            return button;
+        }
+
+        /**
+         * Create clear sessions button
+         */
+        createClearButton() {
+            const button = document.createElement('button');
+            button.innerHTML = '🗑️';
+            button.title = 'Clear all sessions';
+            Object.assign(button.style, {
+                background: 'none',
+                border: 'none',
+                color: STYLE.colors.textPrimary,
+                cursor: 'pointer',
+                fontSize: '14px',
+                padding: '2px 8px',
+                borderRadius: '3px',
+                transition: STYLE.transitions.fast,
+                marginLeft: '5px',
+            });
+
+            button.addEventListener('mouseover', () => {
+                button.style.color = STYLE.colors.danger;
+                button.style.background = 'rgba(255, 0, 0, 0.1)';
+            });
+            button.addEventListener('mouseout', () => {
+                button.style.color = STYLE.colors.textPrimary;
+                button.style.background = 'none';
+            });
+            button.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm('Clear all enhancement sessions?')) {
+                    this.clearAllSessions();
+                }
+            });
+
+            return button;
+        }
+
+        /**
+         * Create collapse button
+         */
+        createCollapseButton() {
+            const button = document.createElement('button');
+            button.id = 'enhancementCollapseButton';
+            button.innerHTML = '▼';
+            button.title = 'Collapse panel';
+            Object.assign(button.style, {
+                background: 'none',
+                border: 'none',
+                color: STYLE.colors.textPrimary,
+                cursor: 'pointer',
+                fontSize: '14px',
+                padding: '2px 8px',
+                borderRadius: '3px',
+                transition: STYLE.transitions.fast,
+            });
+
+            button.addEventListener('mouseover', () => {
+                button.style.color = STYLE.colors.accent;
+                button.style.background = 'rgba(255, 0, 212, 0.1)';
+            });
+            button.addEventListener('mouseout', () => {
+                button.style.color = STYLE.colors.textPrimary;
+                button.style.background = 'none';
+            });
+            button.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.toggleCollapse();
+            });
+
+            return button;
+        }
+
+        /**
+         * Make element draggable
+         */
+        makeDraggable(header) {
+            let offsetX = 0;
+            let offsetY = 0;
+
+            const onMouseMove = (event) => {
+                if (this.isDragging) {
+                    const newLeft = event.clientX - offsetX;
+                    const newTop = event.clientY - offsetY;
+
+                    // Use absolute positioning during drag
+                    this.floatingUI.style.left = `${newLeft}px`;
+                    this.floatingUI.style.right = 'auto';
+                    this.floatingUI.style.top = `${newTop}px`;
+                }
+            };
+
+            const onMouseUp = () => {
+                this.isDragging = false;
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+                this.dragMoveHandler = null;
+                this.dragUpHandler = null;
+            };
+
+            const onMouseDown = (event) => {
+                this.isDragging = true;
+
+                // Calculate offset from panel's current screen position
+                const rect = this.floatingUI.getBoundingClientRect();
+                offsetX = event.clientX - rect.left;
+                offsetY = event.clientY - rect.top;
+
+                this.dragMoveHandler = onMouseMove;
+                this.dragUpHandler = onMouseUp;
+
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+            };
+
+            if (this.dragHandle && this.dragMouseDownHandler) {
+                this.dragHandle.removeEventListener('mousedown', this.dragMouseDownHandler);
+            }
+
+            this.dragHandle = header;
+            this.dragMouseDownHandler = onMouseDown;
+
+            header.addEventListener('mousedown', onMouseDown);
+        }
+
+        /**
+         * Toggle panel collapse state
+         */
+        toggleCollapse() {
+            this.isCollapsed = !this.isCollapsed;
+            const content = document.getElementById('enhancementPanelContent');
+            const button = document.getElementById('enhancementCollapseButton');
+
+            if (this.isCollapsed) {
+                // Collapsed state
+                content.style.maxHeight = '0px';
+                content.style.opacity = '0';
+                content.style.padding = '0 15px';
+                button.innerHTML = '▶';
+                button.title = 'Expand panel';
+                this.floatingUI.style.width = '250px';
+
+                // Show compact summary after content fades
+                const summaryTimeout = setTimeout(() => {
+                    this.showCollapsedSummary();
+                }, 200);
+                this.timerRegistry.registerTimeout(summaryTimeout);
+            } else {
+                // Expanded state
+                this.hideCollapsedSummary();
+                content.style.maxHeight = '600px';
+                content.style.opacity = '1';
+                content.style.padding = '15px';
+                button.innerHTML = '▼';
+                button.title = 'Collapse panel';
+                this.floatingUI.style.width = '350px';
+            }
+        }
+
+        /**
+         * Show compact summary in collapsed state
+         */
+        showCollapsedSummary() {
+            if (!this.isCollapsed) return;
+
+            const session = this.getCurrentSession();
+            const sessions = Object.values(enhancementTracker.getAllSessions());
+
+            // Remove any existing summary
+            this.hideCollapsedSummary();
+
+            if (sessions.length === 0 || !session) return;
+
+            const gameData = dataManager.getInitClientData();
+            const itemDetails = gameData?.itemDetailMap?.[session.itemHrid];
+            const itemName = itemDetails?.name || 'Unknown Item';
+
+            const totalAttempts = session.totalAttempts;
+            const totalSuccess = session.totalSuccesses;
+            const successRate = totalAttempts > 0 ? Math.floor((totalSuccess / totalAttempts) * 100) : 0;
+            const statusIcon = session.state === SessionState.COMPLETED ? '✅' : '🟢';
+
+            const summary = document.createElement('div');
+            summary.id = 'enhancementCollapsedSummary';
+            Object.assign(summary.style, {
+                padding: '10px 15px',
+                fontSize: '12px',
+                borderTop: `1px solid ${STYLE.colors.border}`,
+                color: STYLE.colors.textPrimary,
+            });
+
+            summary.innerHTML = `
+            <div style="font-weight: bold; margin-bottom: 4px;">${itemName} → +${session.targetLevel}</div>
+            <div style="opacity: 0.8;">${statusIcon} ${totalAttempts} attempts | ${successRate}% rate</div>
+        `;
+
+            this.floatingUI.appendChild(summary);
+        }
+
+        /**
+         * Hide collapsed summary
+         */
+        hideCollapsedSummary() {
+            const summary = document.getElementById('enhancementCollapsedSummary');
+            if (summary) {
+                summary.remove();
+            }
+        }
+
+        /**
+         * Navigate between sessions
+         */
+        navigateSession(direction) {
+            const sessions = Object.values(enhancementTracker.getAllSessions());
+            if (sessions.length === 0) return;
+
+            this.currentViewingIndex += direction;
+
+            // Wrap around
+            if (this.currentViewingIndex < 0) {
+                this.currentViewingIndex = sessions.length - 1;
+            } else if (this.currentViewingIndex >= sessions.length) {
+                this.currentViewingIndex = 0;
+            }
+
+            this.updateUI();
+
+            // Update collapsed summary if in collapsed state
+            if (this.isCollapsed) {
+                this.showCollapsedSummary();
+            }
+        }
+
+        /**
+         * Clear all sessions
+         */
+        async clearAllSessions() {
+            await enhancementTracker.clearSessions();
+
+            this.currentViewingIndex = 0;
+            this.updateUI();
+
+            // Hide collapsed summary if shown
+            if (this.isCollapsed) {
+                this.hideCollapsedSummary();
+            }
+        }
+
+        /**
+         * Update UI content (debounced)
+         */
+        scheduleUpdate() {
+            if (this.updateDebounce) {
+                clearTimeout(this.updateDebounce);
+            }
+            this.updateDebounce = setTimeout(() => this.updateUI(), 100);
+            this.timerRegistry.registerTimeout(this.updateDebounce);
+        }
+
+        /**
+         * Update UI content (immediate)
+         */
+        updateUI() {
+            if (!this.floatingUI || !document.body.contains(this.floatingUI)) {
+                return;
+            }
+
+            const content = document.getElementById('enhancementPanelContent');
+            if (!content) return;
+
+            // Update session counter
+            this.updateSessionCounter();
+
+            const sessions = Object.values(enhancementTracker.getAllSessions());
+
+            // No sessions
+            if (sessions.length === 0) {
+                content.innerHTML = `
+                <div style="text-align: center; padding: 40px 20px; color: ${STYLE.colors.textSecondary};">
+                    <div style="font-size: 32px; margin-bottom: 10px;">✧</div>
+                    <div style="font-size: 14px;">Begin enhancing to populate data</div>
+                </div>
+            `;
+                return;
+            }
+
+            const session = this.getCurrentSession();
+            if (!session) {
+                content.innerHTML = '<div style="text-align: center; color: ${STYLE.colors.danger};">Invalid session</div>';
+                return;
+            }
+
+            // Remember expanded state before updating
+            const detailsId = `cost-details-${session.id}`;
+            const detailsElement = document.getElementById(detailsId);
+            const wasExpanded = detailsElement && detailsElement.style.display !== 'none';
+
+            // Build UI content
+            content.innerHTML = this.generateSessionHTML(session);
+
+            // Restore expanded state after updating
+            if (wasExpanded) {
+                const newDetailsElement = document.getElementById(detailsId);
+                if (newDetailsElement) {
+                    newDetailsElement.style.display = 'block';
+                }
+            }
+
+            // Update collapsed summary if in collapsed state
+            if (this.isCollapsed) {
+                this.showCollapsedSummary();
+            }
+        }
+
+        /**
+         * Update session counter in header
+         */
+        updateSessionCounter() {
+            const counter = document.getElementById('enhancementSessionCounter');
+            if (!counter) return;
+
+            const sessions = Object.values(enhancementTracker.getAllSessions());
+            if (sessions.length === 0) {
+                counter.textContent = '';
+            } else {
+                counter.textContent = `(${this.currentViewingIndex + 1}/${sessions.length})`;
+            }
+        }
+
+        /**
+         * Generate HTML for session display
+         */
+        generateSessionHTML(session) {
+            const gameData = dataManager.getInitClientData();
+            const itemDetails = gameData?.itemDetailMap?.[session.itemHrid];
+            const itemName = itemDetails?.name || 'Unknown Item';
+
+            // Calculate stats
+            const totalAttempts = session.totalAttempts;
+            const totalSuccess = session.totalSuccesses;
+            session.totalFailures;
+            totalAttempts > 0 ? formatters_js.formatPercentage(totalSuccess / totalAttempts, 1) : '0.0%';
+
+            const duration = getSessionDuration(session);
+            const durationText = this.formatDuration(duration);
+
+            // Calculate XP/hour if we have enough data (at least 5 seconds + some XP)
+            const xpPerHour = duration >= 5 && session.totalXP > 0 ? Math.floor((session.totalXP / duration) * 3600) : 0;
+
+            // Status display
+            const statusColor = session.state === SessionState.COMPLETED ? STYLE.colors.success : STYLE.colors.accent;
+            const statusText = session.state === SessionState.COMPLETED ? 'Completed' : 'In Progress';
+
+            // Build HTML
+            let html = `
+            <div style="margin-bottom: 10px; font-size: 13px;">
+                <div style="display: flex; justify-content: space-between;">
+                    <span>Item:</span>
+                    <strong>${itemName}</strong>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span>Target:</span>
+                    <span>+${session.targetLevel}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span>Prot:</span>
+                    <span>+${session.protectFrom}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; margin-top: 5px; color: ${statusColor};">
+                    <span>Status:</span>
+                    <strong>${statusText}</strong>
+                </div>
+            </div>
+        `;
+
+            // Per-level table
+            html += this.generateLevelTable(session);
+
+            // Summary stats
+            html += `
+            <div style="margin-top: 8px;">
+                <div style="display: flex; justify-content: space-between; font-size: 13px;">
+                    <div>
+                        <span>Total Attempts:</span>
+                        <strong> ${totalAttempts}</strong>
+                    </div>
+                    <div>
+                        <span>Prots Used:</span>
+                        <strong> ${session.protectionCount || 0}</strong>
+                    </div>
+                </div>
+            </div>`;
+
+            // Predictions (if available)
+            if (session.predictions) {
+                const predictions = session.predictions;
+                const expAtt = predictions.expectedAttempts || 0;
+                const expProt = predictions.expectedProtections || 0;
+                const actualProt = session.protectionCount || 0;
+
+                // Calculate factors (like Ultimate Tracker)
+                // Use more precision for small values to avoid showing 0.00x
+                const rawAttFactor = expAtt > 0 ? totalAttempts / expAtt : null;
+                const rawProtFactor = expProt > 0 ? actualProt / expProt : null;
+
+                // Format with appropriate precision (more decimals for small values)
+                const formatFactor = (val) => {
+                    if (val === null) return null;
+                    if (val < 0.01) return val.toFixed(3);
+                    return val.toFixed(2);
+                };
+
+                const attFactor = formatFactor(rawAttFactor);
+                const protFactor = formatFactor(rawProtFactor);
+
+                html += `
+            <div style="display: flex; justify-content: space-between; font-size: 12px; margin-top: 4px;">
+                <div style="color: ${STYLE.colors.textSecondary};">
+                    <span>Expected Attempts:</span>
+                    <span> ${expAtt}</span>
+                </div>
+                <div style="color: ${STYLE.colors.textSecondary};">
+                    <span>Expected Prots:</span>
+                    <span> ${expProt}</span>
+                </div>
+            </div>`;
+
+                if (attFactor || protFactor) {
+                    html += `
+            <div style="display: flex; justify-content: space-between; font-size: 12px; margin-top: 2px; color: ${STYLE.colors.textSecondary};">
+                <div>
+                    <span>Attempt Factor:</span>
+                    <strong> ${attFactor ? attFactor + 'x' : '—'}</strong>
+                </div>
+                <div>
+                    <span>Prot Factor:</span>
+                    <strong> ${protFactor ? protFactor + 'x' : '—'}</strong>
+                </div>
+            </div>`;
+                }
+            }
+
+            html += `
+            <div style="margin-top: 8px; display: flex; justify-content: space-between; font-size: 13px;">
+                <span>Total XP Gained:</span>
+                <strong>${this.formatNumber(session.totalXP)}</strong>
+            </div>
+
+            <div style="margin-top: 8px; display: flex; justify-content: space-between; font-size: 13px;">
+                <span>Session Duration:</span>
+                <strong>${durationText}</strong>
+            </div>
+
+            <div style="margin-top: 8px; display: flex; justify-content: space-between; font-size: 13px;">
+                <span>XP/Hour:</span>
+                <strong>${xpPerHour > 0 ? this.formatNumber(xpPerHour) : 'Calculating...'}</strong>
+            </div>
+        `;
+
+            // Material costs
+            html += this.generateMaterialCostsHTML(session);
+
+            return html;
+        }
+
+        /**
+         * Generate per-level breakdown table
+         */
+        generateLevelTable(session) {
+            // Get all levels with attempts
+            const levelSet = new Set(Object.keys(session.attemptsPerLevel).map(Number));
+
+            // Always include the current level (even if no attempts yet)
+            if (session.currentLevel > 0) {
+                levelSet.add(session.currentLevel);
+            }
+
+            const levels = Array.from(levelSet).sort((a, b) => b - a);
+
+            if (levels.length === 0) {
+                return '<div style="text-align: center; padding: 20px; color: ${STYLE.colors.textSecondary};">No attempts recorded yet</div>';
+            }
+
+            let rows = '';
+            for (const level of levels) {
+                const levelData = session.attemptsPerLevel[level] || { success: 0, fail: 0, successRate: 0 };
+                const rate = formatters_js.formatPercentage(levelData.successRate, 1);
+                const isCurrent = level === session.currentLevel;
+
+                const rowStyle = isCurrent
+                    ? `
+                background: linear-gradient(90deg, rgba(126, 87, 194, 0.25), rgba(0, 242, 255, 0.1));
+                box-shadow: 0 0 12px rgba(126, 87, 194, 0.5), inset 0 0 6px rgba(0, 242, 255, 0.3);
+                border-left: 3px solid ${STYLE.colors.accent};
+                font-weight: bold;
+            `
+                    : '';
+
+                rows += `
+                <tr style="${rowStyle}">
+                    <td style="${compactCellStyle} text-align: center;">${level}</td>
+                    <td style="${compactCellStyle} text-align: right;">${levelData.success}</td>
+                    <td style="${compactCellStyle} text-align: right;">${levelData.fail}</td>
+                    <td style="${compactCellStyle} text-align: right;">${rate}</td>
+                </tr>
+            `;
+            }
+
+            return `
+            <table style="${compactTableStyle}">
+                <thead>
+                    <tr>
+                        <th style="${compactHeaderStyle}">Lvl</th>
+                        <th style="${compactHeaderStyle}">Success</th>
+                        <th style="${compactHeaderStyle}">Fail</th>
+                        <th style="${compactHeaderStyle}">%</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+        `;
+        }
+
+        /**
+         * Generate material costs HTML (expandable)
+         */
+        generateMaterialCostsHTML(session) {
+            // Check if there are any costs to display
+            const hasMaterials = session.materialCosts && Object.keys(session.materialCosts).length > 0;
+            const hasCoins = session.coinCost > 0;
+            const hasProtection = session.protectionCost > 0;
+
+            if (!hasMaterials && !hasCoins && !hasProtection) {
+                return '';
+            }
+
+            const gameData = dataManager.getInitClientData();
+            const detailsId = `cost-details-${session.id}`;
+
+            let html = '<div style="margin-top: 12px; font-size: 13px;">';
+
+            // Collapsible header
+            html += `
+            <div style="display: flex; justify-content: space-between; cursor: pointer; font-weight: bold; padding: 5px 0;"
+                 onclick="document.getElementById('${detailsId}').style.display = document.getElementById('${detailsId}').style.display === 'none' ? 'block' : 'none'">
+                <span>💰 Total Cost (click for details)</span>
+                <span style="color: ${STYLE.colors.gold};">${this.formatNumber(session.totalCost)}</span>
+            </div>
+        `;
+
+            // Expandable details section (hidden by default)
+            html += `<div id="${detailsId}" style="display: none; margin-left: 10px; margin-top: 5px;">`;
+
+            // Material costs
+            if (hasMaterials) {
+                html +=
+                    '<div style="margin-bottom: 8px; padding: 5px; background: rgba(0, 255, 234, 0.05); border-radius: 4px;">';
+                html +=
+                    '<div style="font-weight: bold; margin-bottom: 3px; color: ${STYLE.colors.textSecondary};">Materials:</div>';
+
+                for (const [itemHrid, data] of Object.entries(session.materialCosts)) {
+                    const itemDetails = gameData?.itemDetailMap?.[itemHrid];
+                    const itemName = itemDetails?.name || itemHrid;
+                    const unitCost = Math.floor(data.totalCost / data.count);
+
+                    html += `
+                    <div style="display: flex; justify-content: space-between; margin-top: 2px; font-size: 12px;">
+                        <span>${itemName}</span>
+                        <span>${data.count} × ${this.formatNumber(unitCost)} = <span style="color: ${STYLE.colors.gold};">${this.formatNumber(data.totalCost)}</span></span>
+                    </div>
+                `;
+                }
+                html += '</div>';
+            }
+
+            // Coin costs
+            if (hasCoins) {
+                html += `
+                <div style="display: flex; justify-content: space-between; margin-top: 2px; padding: 5px; background: rgba(0, 255, 234, 0.05); border-radius: 4px;">
+                    <span style="font-weight: bold; color: ${STYLE.colors.textSecondary};">Coins (${session.coinCount || 0}×):</span>
+                    <span style="color: ${STYLE.colors.gold};">${this.formatNumber(session.coinCost)}</span>
+                </div>
+            `;
+            }
+
+            // Protection costs
+            if (hasProtection) {
+                const protectionItemName = session.protectionItemHrid
+                    ? gameData?.itemDetailMap?.[session.protectionItemHrid]?.name || 'Protection'
+                    : 'Protection';
+
+                html += `
+                <div style="display: flex; justify-content: space-between; margin-top: 2px; padding: 5px; background: rgba(0, 255, 234, 0.05); border-radius: 4px;">
+                    <span style="font-weight: bold; color: ${STYLE.colors.textSecondary};">${protectionItemName} (${session.protectionCount || 0}×):</span>
+                    <span style="color: ${STYLE.colors.gold};">${this.formatNumber(session.protectionCost)}</span>
+                </div>
+            `;
+            }
+
+            html += '</div>'; // Close details
+            html += '</div>'; // Close container
+
+            return html;
+        }
+
+        /**
+         * Format number with commas
+         */
+        formatNumber(num) {
+            return Math.floor(num).toLocaleString();
+        }
+
+        /**
+         * Format duration (seconds to h:m:s)
+         */
+        formatDuration(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+
+            if (h > 0) {
+                return `${h}h ${m}m ${s}s`;
+            } else if (m > 0) {
+                return `${m}m ${s}s`;
+            } else {
+                return `${s}s`;
+            }
+        }
+
+        /**
+         * Show the UI
+         */
+        show() {
+            if (this.floatingUI) {
+                this.floatingUI.style.display = 'flex';
+            }
+        }
+
+        /**
+         * Hide the UI
+         */
+        hide() {
+            if (this.floatingUI) {
+                this.floatingUI.style.display = 'none';
+            }
+        }
+
+        /**
+         * Toggle UI visibility
+         */
+        toggle() {
+            if (this.floatingUI) {
+                const isVisible = this.floatingUI.style.display !== 'none';
+                if (isVisible) {
+                    this.hide();
+                } else {
+                    this.show();
+                }
+            }
+        }
+
+        /**
+         * Cleanup all UI resources
+         */
+        cleanup() {
+            // Clear any pending update debounces
+            if (this.updateDebounce) {
+                clearTimeout(this.updateDebounce);
+                this.updateDebounce = null;
+            }
+
+            // Disconnect panel removal observer
+            if (this.panelRemovalObserver) {
+                this.panelRemovalObserver.disconnect();
+                this.panelRemovalObserver = null;
+            }
+
+            // Unregister setting change listeners
+            for (const { key } of this.settingChangeHandlers) {
+                config.offSettingChange(key);
+            }
+            this.settingChangeHandlers = [];
+
+            if (this.updateInterval) {
+                clearInterval(this.updateInterval);
+                this.updateInterval = null;
+            }
+
+            // Unregister DOM observer
+            if (this.unregisterScreenObserver) {
+                this.unregisterScreenObserver();
+                this.unregisterScreenObserver = null;
+            }
+
+            if (this.dragMoveHandler) {
+                document.removeEventListener('mousemove', this.dragMoveHandler);
+                this.dragMoveHandler = null;
+            }
+
+            if (this.dragUpHandler) {
+                document.removeEventListener('mouseup', this.dragUpHandler);
+                this.dragUpHandler = null;
+            }
+
+            if (this.dragHandle && this.dragMouseDownHandler) {
+                this.dragHandle.removeEventListener('mousedown', this.dragMouseDownHandler);
+            }
+
+            this.dragHandle = null;
+            this.dragMouseDownHandler = null;
+
+            this.timerRegistry.clearAll();
+
+            // Remove floating UI from DOM
+            if (this.floatingUI && this.floatingUI.parentNode) {
+                this.floatingUI.parentNode.removeChild(this.floatingUI);
+                this.floatingUI = null;
+            }
+
+            // Reset state
+            this.isOnEnhancingScreen = false;
+            this.isCollapsed = false;
+            this.currentViewingIndex = 0;
+            this.isDragging = false;
+        }
+    }
+
+    const enhancementUI = new EnhancementUI();
+
+    /**
+     * Enhancement Event Handlers
+     * Automatically detects and tracks enhancement events from WebSocket messages
+     */
+
+
+    /**
+     * Setup enhancement event handlers
+     */
+    function setupEnhancementHandlers() {
+        // Listen for action_completed (when enhancement completes)
+        webSocketHook.on('action_completed', handleActionCompleted);
+
+        // Listen for actions_updated to detect new enhancing queues (handles page-load mid-session
+        // and sets pending start so the next action_completed creates a session regardless of currentCount)
+        webSocketHook.on('actions_updated', handleActionsUpdated);
+
+        // Listen for wildcard to catch all messages for debugging
+        webSocketHook.on('*', handleDebugMessage);
+    }
+
+    /**
+     * Handle actions_updated message (detects new enhancing queue)
+     * Sets pendingSessionStart so the next action_completed creates a session regardless of currentCount.
+     * @param {Object} data - WebSocket message data
+     */
+    async function handleActionsUpdated(data) {
+        if (!config.getSetting('enhancementTracker')) return;
+        if (!enhancementTracker.isInitialized) return;
+
+        const actions = data.endCharacterActions;
+        if (!Array.isArray(actions)) return;
+
+        const enhancingAction = actions.find((a) => a.actionHrid === '/actions/enhancing/enhance');
+        if (!enhancingAction) return;
+
+        enhancementTracker.setPendingStart();
+
+        // If the target level or protection level changed, finalize the current session so the
+        // next action_completed starts a fresh one instead of continuing the old one.
+        const currentSession = enhancementTracker.getCurrentSession();
+        if (currentSession) {
+            const targetChanged = enhancingAction.enhancingMaxLevel !== currentSession.targetLevel;
+            const protectionChanged =
+                (enhancingAction.enhancingProtectionMinLevel || 0) !== (currentSession.protectFrom || 0);
+            if (targetChanged || protectionChanged) {
+                await enhancementTracker.finalizeCurrentSession();
+            }
+        }
+    }
+
+    /**
+     * Debug handler to log all messages temporarily
+     * @param {Object} _data - WebSocket message data
+     */
+    function handleDebugMessage(_data) {
+        // Debug logging removed
+    }
+
+    /**
+     * Handle action_completed message (detects enhancement results)
+     * @param {Object} data - WebSocket message data
+     */
+    async function handleActionCompleted(data) {
+        if (!config.getSetting('enhancementTracker')) return;
+        if (!enhancementTracker.isInitialized) return;
+
+        const action = data.endCharacterAction;
+        if (!action) return;
+
+        // Check if this is an enhancement action
+        // Ultimate Enhancement Tracker checks: actionHrid === "/actions/enhancing/enhance"
+        if (action.actionHrid !== '/actions/enhancing/enhance') {
+            return;
+        }
+
+        // Handle the enhancement
+        await handleEnhancementResult(action);
+    }
+
+    /**
+     * Extract protection item HRID from action data
+     * @param {Object} action - Enhancement action data
+     * @returns {string|null} Protection item HRID or null
+     */
+    function getProtectionItemHrid(action) {
+        // Check if protection is enabled
+        if (!action.enhancingProtectionMinLevel || action.enhancingProtectionMinLevel < 2) {
+            return null;
+        }
+
+        // Extract protection item from secondaryItemHash (Ultimate Tracker method)
+        if (action.secondaryItemHash) {
+            const parts = action.secondaryItemHash.split('::');
+            if (parts.length >= 3 && parts[2].startsWith('/items/')) {
+                return parts[2];
+            }
+        }
+
+        // Fallback: check if there's a direct enhancingProtectionItemHrid field
+        if (action.enhancingProtectionItemHrid) {
+            return action.enhancingProtectionItemHrid;
+        }
+
+        return null;
+    }
+
+    /**
+     * Parse item hash to extract HRID and level
+     * Based on Ultimate Enhancement Tracker's parseItemHash function
+     * @param {string} primaryItemHash - Item hash from action
+     * @returns {Object} {itemHrid, level}
+     */
+    function parseItemHash(primaryItemHash) {
+        try {
+            // Handle different possible formats:
+            // 1. "/item_locations/inventory::/items/enhancers_bottoms::0" (level 0)
+            // 2. "161296::/item_locations/inventory::/items/enhancers_bottoms::5" (level 5)
+            // 3. Direct HRID like "/items/enhancers_bottoms" (no level)
+
+            let itemHrid = null;
+            let level = 0; // Default to 0 if not specified
+
+            // Split by :: to parse components
+            const parts = primaryItemHash.split('::');
+
+            // Find the part that starts with /items/
+            const itemPart = parts.find((part) => part.startsWith('/items/'));
+            if (itemPart) {
+                itemHrid = itemPart;
+            }
+            // If no /items/ found but it's a direct HRID
+            else if (primaryItemHash.startsWith('/items/')) {
+                itemHrid = primaryItemHash;
+            }
+
+            // Try to extract enhancement level (last part after ::)
+            const lastPart = parts[parts.length - 1];
+            if (lastPart && !lastPart.startsWith('/')) {
+                const parsedLevel = parseInt(lastPart, 10);
+                if (!isNaN(parsedLevel)) {
+                    level = parsedLevel;
+                }
+            }
+
+            return { itemHrid, level };
+        } catch {
+            return { itemHrid: null, level: 0 };
+        }
+    }
+
+    /**
+     * Get enhancement materials and costs for an item
+     * Based on Ultimate Enhancement Tracker's getEnhancementMaterials function
+     * @param {string} itemHrid - Item HRID
+     * @returns {Array|null} Array of [hrid, count] pairs or null
+     */
+    function getEnhancementMaterials(itemHrid) {
+        try {
+            const gameData = dataManager.getInitClientData();
+            const itemData = gameData?.itemDetailMap?.[itemHrid];
+
+            if (!itemData) {
+                return null;
+            }
+
+            // Get the costs array
+            const costs = itemData.enhancementCosts;
+
+            if (!costs) {
+                return null;
+            }
+
+            let materials = [];
+
+            // Case 1: Array of objects (current format)
+            if (Array.isArray(costs) && costs.length > 0 && typeof costs[0] === 'object') {
+                materials = costs.map((cost) => [cost.itemHrid, cost.count]);
+            }
+            // Case 2: Already in correct format [["/items/foo", 30], ["/items/bar", 20]]
+            else if (Array.isArray(costs) && costs.length > 0 && Array.isArray(costs[0])) {
+                materials = costs;
+            }
+            // Case 3: Object format {"/items/foo": 30, "/items/bar": 20}
+            else if (typeof costs === 'object' && !Array.isArray(costs)) {
+                materials = Object.entries(costs);
+            }
+
+            // Filter out any invalid entries
+            materials = materials.filter(
+                (m) => Array.isArray(m) && m.length === 2 && typeof m[0] === 'string' && typeof m[1] === 'number'
+            );
+
+            return materials.length > 0 ? materials : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Track material costs for current attempt
+     * Based on Ultimate Enhancement Tracker's trackMaterialCosts function
+     * @param {string} itemHrid - Item HRID
+     * @returns {Promise<{materialCost: number, coinCost: number}>}
+     */
+    async function trackMaterialCosts(itemHrid) {
+        const materials = getEnhancementMaterials(itemHrid) || [];
+        let materialCost = 0;
+        let coinCost = 0;
+
+        for (const [resourceHrid, count] of materials) {
+            // Check if this is coins
+            if (resourceHrid.includes('/items/coin')) {
+                // Track coins for THIS ATTEMPT ONLY
+                coinCost = count; // Coins are 1:1 value
+                await enhancementTracker.trackCoinCost(count);
+            } else {
+                // Track material costs
+                await enhancementTracker.trackMaterialCost(resourceHrid, count);
+                // Add to material cost total
+                const priceData = marketAPI.getPrice(resourceHrid, 0);
+                const unitCost = priceData ? priceData.ask || priceData.bid || 0 : 0;
+                materialCost += unitCost * count;
+            }
+        }
+
+        return { materialCost, coinCost };
+    }
+
+    /**
+     * Handle enhancement result (success or failure)
+     * @param {Object} action - Enhancement action data
+     * @param {Object} _data - Full WebSocket message data
+     */
+    async function handleEnhancementResult(action, _data) {
+        try {
+            const { itemHrid, level: newLevel } = parseItemHash(action.primaryItemHash);
+            const rawCount = action.currentCount || 0;
+
+            if (!itemHrid) {
+                return;
+            }
+
+            // Check for item changes on EVERY attempt (not just rawCount === 1)
+            let currentSession = enhancementTracker.getCurrentSession();
+            let justCreatedNewSession = false;
+
+            // If session exists but is for a different item, finalize and start new session
+            if (currentSession && currentSession.itemHrid !== itemHrid) {
+                await enhancementTracker.finalizeCurrentSession();
+                currentSession = null;
+
+                // Create new session for the new item
+                const protectFrom = action.enhancingProtectionMinLevel || 0;
+                const targetLevel = action.enhancingMaxLevel || Math.min(newLevel + 5, 20);
+
+                // Infer starting level from current level
+                let startLevel = newLevel;
+                if (newLevel > 0 && newLevel < Math.max(2, protectFrom)) {
+                    startLevel = newLevel - 1;
+                }
+
+                const sessionId = await enhancementTracker.startSession(itemHrid, startLevel, targetLevel, protectFrom);
+                currentSession = enhancementTracker.getCurrentSession();
+                justCreatedNewSession = true; // Flag that we just created this session
+
+                // Switch UI to new session and update display
+                enhancementUI.switchToSession(sessionId);
+                enhancementUI.scheduleUpdate();
+            }
+
+            // On first attempt (rawCount === 1) OR after a clear/new-queue (pendingSessionStart),
+            // start a session if none is active yet.
+            const startedViaPending = enhancementTracker.pendingSessionStart && rawCount !== 1;
+            const shouldStartNew =
+                (rawCount === 1 || enhancementTracker.pendingSessionStart) && !justCreatedNewSession && !currentSession;
+
+            if (shouldStartNew) {
+                enhancementTracker.pendingSessionStart = false;
+                // CRITICAL: On first event, primaryItemHash shows RESULT level, not starting level
+                // We need to infer the starting level from the result
+                const protectFrom = action.enhancingProtectionMinLevel || 0;
+                let startLevel = newLevel;
+
+                // If result > 0 and below protection threshold, must have started one level lower
+                if (newLevel > 0 && newLevel < Math.max(2, protectFrom)) {
+                    startLevel = newLevel - 1; // Successful enhancement (e.g., 0→1)
+                }
+                // Otherwise, started at same level (e.g., 0→0 failure, or protected failure)
+
+                // Always start new session when tracker is enabled
+                const targetLevel = action.enhancingMaxLevel || Math.min(newLevel + 5, 20);
+                const sessionId = await enhancementTracker.startSession(itemHrid, startLevel, targetLevel, protectFrom);
+                currentSession = enhancementTracker.getCurrentSession();
+
+                // Switch UI to new session and update display
+                enhancementUI.switchToSession(sessionId);
+                enhancementUI.scheduleUpdate();
+
+                if (!currentSession) {
+                    return;
+                }
+
+                // Session was created mid-run (not at a natural queue start) — we don't have a
+                // reliable baseline level, so skip recording success/failure for this first attempt.
+                // Costs are still tracked. On a normal rawCount === 1 start, we record as usual.
+                if (startedViaPending) {
+                    justCreatedNewSession = true;
+                }
+            }
+
+            // If no active session, check if we can extend a completed session
+            if (!currentSession) {
+                // Try to extend a completed session for the same item
+                const extendableSessionId = enhancementTracker.findExtendableSession(itemHrid, newLevel);
+                if (extendableSessionId) {
+                    const newTarget = action.enhancingMaxLevel || Math.min(newLevel + 5, 20);
+                    await enhancementTracker.extendSessionTarget(extendableSessionId, newTarget);
+                    currentSession = enhancementTracker.getCurrentSession();
+
+                    // Switch UI to extended session and update display
+                    enhancementUI.switchToSession(extendableSessionId);
+                    enhancementUI.scheduleUpdate();
+                } else {
+                    return;
+                }
+            }
+
+            // Calculate adjusted attempt count (resume-proof)
+            const adjustedCount = calculateAdjustedAttemptCount(currentSession);
+
+            // Track costs for EVERY attempt (including first)
+            const { materialCost: _materialCost, coinCost: _coinCost } = await trackMaterialCosts(itemHrid);
+
+            // Get previous level from lastAttempt
+            const previousLevel = currentSession.lastAttempt?.level ?? currentSession.startLevel;
+
+            // Check protection item usage BEFORE recording attempt
+            // Track protection cost if protection item exists in action data
+            // Protection items are consumed when:
+            // 1. Level would have decreased (Mirror of Protection prevents decrease, level stays same)
+            const protectionItemHrid = getProtectionItemHrid(action);
+            if (protectionItemHrid) {
+                // Only track if we're at a level where protection might be used
+                const protectFrom = currentSession.protectFrom || 0;
+                const shouldTrack = previousLevel >= Math.max(2, protectFrom);
+
+                // Protection is consumed only on failure (level stays same or would have decreased)
+                // Successful enhancements do NOT consume a protection item
+                if (shouldTrack && newLevel <= previousLevel) {
+                    // Use market price (like Ultimate Tracker) instead of vendor price
+                    const marketPrice = marketAPI.getPrice(protectionItemHrid, 0);
+                    let protectionCost = marketPrice?.ask || marketPrice?.bid || 0;
+
+                    // Fall back to vendor price if market price unavailable
+                    if (protectionCost === 0) {
+                        const gameData = dataManager.getInitClientData();
+                        const protectionItem = gameData?.itemDetailMap?.[protectionItemHrid];
+                        if (!protectionItem) {
+                            console.warn(
+                                `[EnhancementHandlers] Protection item not found in game data: ${protectionItemHrid}`
+                            );
+                        }
+                        protectionCost = protectionItem?.vendorSellPrice || 0;
+                    }
+
+                    await enhancementTracker.trackProtectionCost(protectionItemHrid, protectionCost);
+                }
+            }
+
+            // Determine result type
+            const wasSuccess = newLevel > previousLevel;
+
+            // Failure detection:
+            // 1. Level decreased (1→0, 5→4, etc.)
+            // 2. Stayed at 0 (0→0 fail)
+            // 3. Stayed at non-zero level WITH protection item (protected failure)
+            const levelDecreased = newLevel < previousLevel;
+            const failedAtZero = previousLevel === 0 && newLevel === 0;
+            const protectedFailure = previousLevel > 0 && newLevel === previousLevel && protectionItemHrid !== null;
+            const wasFailure = levelDecreased || failedAtZero || protectedFailure;
+
+            const _wasBlessed = wasSuccess && newLevel - previousLevel >= 2; // Blessed tea detection
+
+            // Update lastAttempt BEFORE recording (so next attempt compares correctly)
+            currentSession.lastAttempt = {
+                attemptNumber: adjustedCount,
+                level: newLevel,
+                timestamp: Date.now(),
+            };
+
+            // Record the result and track XP
+            // Skip on the first attempt of a newly created session — we don't have a reliable
+            // baseline level yet, but lastAttempt is still set so the next attempt works correctly.
+            if (!justCreatedNewSession) {
+                if (wasSuccess) {
+                    const xpGain = calculateSuccessXP(previousLevel, itemHrid);
+                    currentSession.totalXP += xpGain;
+
+                    await enhancementTracker.recordSuccess(previousLevel, newLevel);
+                    enhancementUI.scheduleUpdate(); // Update UI after success
+
+                    // Check if we've reached target
+                    if (newLevel >= currentSession.targetLevel) {
+                        // Target reached - session will auto-complete on next UI update
+                    }
+                } else if (wasFailure) {
+                    const xpGain = calculateFailureXP(previousLevel, itemHrid);
+                    currentSession.totalXP += xpGain;
+
+                    await enhancementTracker.recordFailure(previousLevel, newLevel);
+                    enhancementUI.scheduleUpdate(); // Update UI after failure
+                }
+            }
+            // Note: If newLevel === previousLevel (and not 0->0), we track costs but don't record attempt
+            // This happens with protection items that prevent level decrease
+        } catch (error) {
+            console.error('[EnhancementHandlers] Enhancement result handler failed:', error);
+        }
+    }
+
+    /**
+     * Cleanup event handlers
+     */
+    function cleanupEnhancementHandlers() {
+        webSocketHook.off('action_completed', handleActionCompleted);
+        webSocketHook.off('actions_updated', handleActionsUpdated);
+        webSocketHook.off('*', handleDebugMessage);
+    }
+
+    /**
+     * Enhancement Feature Wrapper
+     * Manages initialization and cleanup of all enhancement-related components
+     * Fixes handler accumulation by coordinating tracker, UI, and handlers
+     */
+
+
+    class EnhancementFeature {
+        constructor() {
+            this.isInitialized = false;
+        }
+
+        /**
+         * Initialize all enhancement components
+         */
+        async initialize() {
+            if (this.isInitialized) {
+                return;
+            }
+
+            this.isInitialized = true;
+
+            // Initialize tracker (async)
+            await enhancementTracker.initialize();
+
+            // Setup WebSocket handlers
+            setupEnhancementHandlers();
+
+            // Initialize UI
+            enhancementUI.initialize();
+        }
+
+        /**
+         * Cleanup all enhancement components
+         */
+        disable() {
+            // Cleanup WebSocket handlers
+            cleanupEnhancementHandlers();
+
+            // Cleanup UI
+            enhancementUI.cleanup();
+
+            // Cleanup tracker (has its own disable method)
+            if (enhancementTracker.disable) {
+                enhancementTracker.disable();
+            }
+
+            this.isInitialized = false;
+        }
+    }
+
+    const enhancementFeature = new EnhancementFeature();
+
+    /**
+     * Guild XP Tracker
+     * Records guild-level and per-member XP over time via WebSocket messages.
+     * Stores history in IndexedDB for XP/hr rate calculations.
+     *
+     * Data sources:
+     * - character_initialized (via dataManager) — initial snapshot on login
+     * - guild_updated — guild total XP changes
+     * - guild_characters_updated — per-member XP changes
+     * - leaderboard_updated (category: guild) — XP for all guilds on leaderboard
+     */
+
+
+    const STORE_NAME = 'guildHistory';
+    const WINDOW_10M = 10 * 60 * 1000;
+    const WINDOW_1H = 60 * 60 * 1000;
+    const WINDOW_1D = 24 * 60 * 60 * 1000;
+    const WINDOW_1W = 7 * 24 * 60 * 60 * 1000;
+
+    /**
+     * Guild level experience table (same thresholds as skill levels).
+     * Hardcoded because initClientData may not expose guild-specific thresholds.
+     */
+    const LEVEL_EXPERIENCE_TABLE = [
+        0, 33, 76, 132, 202, 286, 386, 503, 637, 791, 964, 1159, 1377, 1620, 1891, 2192, 2525, 2893, 3300, 3750, 4247, 4795,
+        5400, 6068, 6805, 7618, 8517, 9508, 10604, 11814, 13151, 14629, 16262, 18068, 20064, 22271, 24712, 27411, 30396,
+        33697, 37346, 41381, 45842, 50773, 56222, 62243, 68895, 76242, 84355, 93311, 103195, 114100, 126127, 139390, 154009,
+        170118, 187863, 207403, 228914, 252584, 278623, 307256, 338731, 373318, 411311, 453030, 498824, 549074, 604193,
+        664632, 730881, 803472, 882985, 970050, 1065351, 1169633, 1283701, 1408433, 1544780, 1693774, 1856536, 2034279,
+        2228321, 2440088, 2671127, 2923113, 3197861, 3497335, 3823663, 4179145, 4566274, 4987741, 5446463, 5945587, 6488521,
+        7078945, 7720834, 8418485, 9176537, 10000000, 11404976, 12904567, 14514400, 16242080, 18095702, 20083886, 22215808,
+        24501230, 26950540, 29574787, 32385721, 35395838, 38618420, 42067584, 45758332, 49706603, 53929328, 58444489,
+        63271179, 68429670, 73941479, 79829440, 86117783, 92832214, 100000000, 114406130, 130118394, 147319656, 166147618,
+        186752428, 209297771, 233962072, 260939787, 290442814, 322702028, 357968938, 396517495, 438646053, 484679494,
+        534971538, 589907252, 649905763, 715423218, 786955977, 865044093, 950275074, 1043287971, 1144777804, 1255500373,
+        1376277458, 1508002470, 1651646566, 1808265285, 1979005730, 2165114358, 2367945418, 2588970089, 2829786381,
+        3092129857, 3377885250, 3689099031, 4027993033, 4396979184, 4798675471, 5235923207, 5711805728, 6229668624,
+        6793141628, 7406162301, 8073001662, 8798291902, 9587056372, 10444742007, 11377254401, 12390995728, 13492905745,
+        14690506120, 15991948361, 17406065609, 18942428633, 20611406335, 22424231139, 24393069640, 26531098945, 28852589138,
+        31372992363, 34109039054, 37078841860, 40302007875, 43799759843, 47595067021, 51712786465, 56179815564, 61025256696,
+        66280594953, 71979889960, 78159982881, 84860719814, 92125192822, 100000000000,
+    ];
+
+    // ─── History compaction helpers ──────────────────────────────────────────────
+    // Same compaction rules as src/features/skills/xp-tracker.js
+
+    /**
+     * Append an XP data point to a history array, compacting as needed.
+     * @param {Array} arr - Existing history array (mutated in place)
+     * @param {{t: number, xp: number}} d - New data point
+     */
+    function pushXP(arr, d) {
+        if (arr.length === 0 || d.xp >= arr[arr.length - 1].xp) {
+            arr.push(d);
+        } else {
+            return; // XP should never decrease
+        }
+
+        if (arr.length <= 2) return;
+
+        // Rule 1: within the last 10 minutes, keep only first + last
+        let recentLength = 0;
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (d.t - arr[i].t <= WINDOW_10M) {
+                recentLength++;
+            } else {
+                break;
+            }
+        }
+        if (recentLength > 2) {
+            arr.splice(arr.length - recentLength + 1, recentLength - 2);
+        }
+
+        // Rule 2: collapse consecutive same-XP entries within 1 hour
+        let sameLength = 0;
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (arr[i].xp === d.xp && d.t - arr[i].t <= WINDOW_1H) {
+                sameLength++;
+            } else {
+                break;
+            }
+        }
+        if (sameLength > 1) {
+            arr.splice(arr.length - sameLength, sameLength - 1);
+        }
+
+        // Rule 3: drop entries older than 1 week
+        let oldLength = 0;
+        for (let i = 0; i < arr.length; i++) {
+            if (d.t - arr[i].t > WINDOW_1W) {
+                oldLength++;
+            } else {
+                break;
+            }
+        }
+        if (oldLength > 0) {
+            arr.splice(0, oldLength);
+        }
+    }
+
+    /**
+     * Filter history to entries within a time interval from now.
+     * @param {Array} arr - History array
+     * @param {number} interval - Window in ms
+     * @returns {Array}
+     */
+    function inLastInterval(arr, interval) {
+        const now = Date.now();
+        const result = [];
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (now - arr[i].t <= interval) {
+                result.unshift(arr[i]);
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Keep at most one entry per interval (for chart resolution).
+     * @param {Array} arr - History array
+     * @param {number} interval - Minimum gap between kept entries
+     * @returns {Array}
+     */
+    function keepOneInInterval(arr, interval) {
+        const filtered = [];
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (filtered.length === 0) {
+                filtered.unshift(arr[i]);
+            } else if (filtered[0].t - arr[i].t >= interval) {
+                filtered.unshift(arr[i]);
+            } else if (i === 0) {
+                filtered.unshift(arr[i]);
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Calculate XP/hr between two data points.
+     * @param {{t: number, xp: number}} prev
+     * @param {{t: number, xp: number}} cur
+     * @returns {number} XP per hour
+     */
+    function calcXPH(prev, cur) {
+        const tDeltaMs = cur.t - prev.t;
+        if (tDeltaMs <= 0) return 0;
+        return ((cur.xp - prev.xp) / tDeltaMs) * 3600000;
+    }
+
+    // ─── Stats calculation ──────────────────────────────────────────────────────
+
+    /**
+     * Compute XP/hr stats for a history array.
+     * @param {Array} arr - [{t, xp}, ...]
+     * @returns {{lastXPH: number, lastHourXPH: number, lastDayXPH: number, chart: Array}}
+     */
+    function calcStats(arr) {
+        const empty = { lastXPH: 0, lastHourXPH: 0, lastDayXPH: 0, chart: [] };
+        if (!arr || arr.length < 2) return empty;
+
+        // Last XP/h (between last two entries)
+        const lastXPH = calcXPH(arr[arr.length - 2], arr[arr.length - 1]);
+
+        // Last hour XP/h
+        const last1h = inLastInterval(arr, WINDOW_1H);
+        const lastHourXPH = last1h.length >= 2 ? calcXPH(last1h[0], last1h[last1h.length - 1]) : 0;
+
+        // Last day XP/h
+        const last1d = inLastInterval(arr, WINDOW_1D);
+        const lastDayXPH = last1d.length >= 2 ? calcXPH(last1d[0], last1d[last1d.length - 1]) : 0;
+
+        // Chart: weekly data at 10m resolution
+        const last1w = inLastInterval(arr, WINDOW_1W);
+        const chartData = keepOneInInterval(last1w, WINDOW_10M);
+        const chart = [];
+        for (let i = 1; i < chartData.length; i++) {
+            const prev = chartData[i - 1];
+            const cur = chartData[i];
+            chart.push({
+                t: cur.t,
+                tD: cur.t - prev.t,
+                xpH: calcXPH(prev, cur),
+            });
+        }
+
+        return { lastXPH, lastHourXPH, lastDayXPH, chart };
+    }
+
+    /**
+     * Calculate time to next guild level.
+     * @param {number} currentXP - Current guild XP
+     * @param {number} xpPerHour - Current XP/hr rate
+     * @returns {number|null} Milliseconds to next level, or null if cannot calculate
+     */
+    function calcTimeToLevel(currentXP, xpPerHour) {
+        if (xpPerHour <= 0) return null;
+
+        const nextLvlIndex = LEVEL_EXPERIENCE_TABLE.findIndex((xp) => currentXP <= xp);
+        if (nextLvlIndex < 0) return null;
+
+        const xpTillLevel = LEVEL_EXPERIENCE_TABLE[nextLvlIndex] - currentXP;
+        if (xpTillLevel <= 0) return null;
+
+        return (xpTillLevel / xpPerHour) * 3600000;
+    }
+
+    // ─── Tracker class ──────────────────────────────────────────────────────────
+
+    class GuildXPTracker {
+        constructor() {
+            this.initialized = false;
+            this.ownGuildName = null;
+            this.ownGuildID = null;
+            this.guildCreatedAt = null;
+            this.guildXPHistory = {}; // guildName → [{t, xp}]
+            this.memberXPHistory = {}; // characterID → [{t, xp}]
+            this.memberMeta = {}; // characterID → {name, gameMode, joinTime, invitedBy}
+            this.unregisterHandlers = [];
+        }
+
+        async initialize() {
+            if (this.initialized) return;
+            if (!config.getSetting('guildXPTracker', true)) return;
+
+            // Bind handlers
+            this._boundOnCharacterInit = (data) => this._onCharacterInit(data);
+            this._boundOnGuildUpdated = (data) => this._onGuildUpdated(data);
+            this._boundOnMembersUpdated = (data) => this._onMembersUpdated(data);
+            this._boundOnLeaderboardUpdated = (data) => this._onLeaderboardUpdated(data);
+
+            // Register dataManager listener for init data
+            dataManager.on('character_initialized', this._boundOnCharacterInit);
+            this.unregisterHandlers.push(() => dataManager.off('character_initialized', this._boundOnCharacterInit));
+
+            // Register WebSocket listeners
+            webSocketHook.on('guild_updated', this._boundOnGuildUpdated);
+            webSocketHook.on('guild_characters_updated', this._boundOnMembersUpdated);
+            webSocketHook.on('leaderboard_updated', this._boundOnLeaderboardUpdated);
+            this.unregisterHandlers.push(() => {
+                webSocketHook.off('guild_updated', this._boundOnGuildUpdated);
+                webSocketHook.off('guild_characters_updated', this._boundOnMembersUpdated);
+                webSocketHook.off('leaderboard_updated', this._boundOnLeaderboardUpdated);
+            });
+
+            // If character data already loaded, initialize immediately
+            if (dataManager.characterData) {
+                await this._onCharacterInit(dataManager.characterData);
+            }
+
+            this.initialized = true;
+        }
+
+        /**
+         * Handle character initialization — load persisted history and record initial snapshot.
+         * @param {Object} data - Full init_character_data message
+         */
+        async _onCharacterInit(data) {
+            const guild = data.guild;
+            if (!guild) return; // Player not in a guild
+
+            const guildName = guild.name;
+            const guildXP = guild.experience;
+            this.ownGuildName = guildName;
+            this.guildCreatedAt = guild.createdAt;
+
+            // Extract guild ID and member metadata
+            const guildCharacterMap = data.guildCharacterMap || {};
+            const sharableMap = data.guildSharableCharacterMap || {};
+
+            const charIds = Object.keys(guildCharacterMap);
+            if (charIds.length > 0) {
+                this.ownGuildID = guildCharacterMap[charIds[0]].guildID;
+            }
+
+            // Build member metadata
+            this.memberMeta = {};
+            for (const [charId, sharableData] of Object.entries(sharableMap)) {
+                const guildChar = guildCharacterMap[charId];
+                const inviterId = guildChar?.inviterCharacterID;
+                this.memberMeta[charId] = {
+                    name: sharableData.name,
+                    gameMode: sharableData.gameMode,
+                    joinTime: guildChar?.joinTime || null,
+                    invitedBy: sharableMap[inviterId]?.name || null,
+                };
+            }
+
+            // Load persisted histories
+            this.guildXPHistory = await storage.get(`guildXP_${guildName}`, STORE_NAME, {});
+            if (this.ownGuildID) {
+                this.memberXPHistory = await storage.get(`memberXP_${this.ownGuildID}`, STORE_NAME, {});
+            }
+
+            const t = data.currentTimestamp ? +new Date(data.currentTimestamp) : Date.now();
+
+            // Record guild XP snapshot
+            if (!this.guildXPHistory[guildName]) {
+                this.guildXPHistory[guildName] = [];
+            }
+            pushXP(this.guildXPHistory[guildName], { t, xp: guildXP });
+
+            // Record member XP snapshots
+            for (const [charId, guildChar] of Object.entries(guildCharacterMap)) {
+                if (!this.memberXPHistory[charId]) {
+                    this.memberXPHistory[charId] = [];
+                }
+                pushXP(this.memberXPHistory[charId], { t, xp: guildChar.guildExperience });
+            }
+
+            // Persist
+            await storage.set(`guildXP_${guildName}`, this.guildXPHistory, STORE_NAME);
+            if (this.ownGuildID) {
+                await storage.set(`memberXP_${this.ownGuildID}`, this.memberXPHistory, STORE_NAME);
+            }
+        }
+
+        /**
+         * Handle guild_updated — record guild-level XP.
+         * @param {Object} data - guild_updated message
+         */
+        _onGuildUpdated(data) {
+            const guild = data.guild;
+            if (!guild) return;
+
+            const name = guild.name;
+            this.ownGuildName = name;
+            this.guildCreatedAt = guild.createdAt;
+
+            if (!this.guildXPHistory[name]) {
+                this.guildXPHistory[name] = [];
+            }
+
+            const t = Date.now();
+            pushXP(this.guildXPHistory[name], { t, xp: guild.experience });
+            storage.set(`guildXP_${name}`, this.guildXPHistory, STORE_NAME);
+        }
+
+        /**
+         * Handle guild_characters_updated — record per-member XP.
+         * @param {Object} data - guild_characters_updated message
+         */
+        async _onMembersUpdated(data) {
+            const guildCharacterMap = data.guildCharacterMap || {};
+            const sharableMap = data.guildSharableCharacterMap || {};
+
+            // Detect guild change (same character, different guild)
+            const charIds = Object.keys(guildCharacterMap);
+            const newGuildID = charIds.length > 0 ? guildCharacterMap[charIds[0]].guildID : null;
+
+            if (newGuildID && this.ownGuildID && newGuildID !== this.ownGuildID) {
+                // Guild switched — clear stale member data and load fresh from storage
+                this.memberXPHistory = await storage.get(`memberXP_${newGuildID}`, STORE_NAME, {});
+                this.memberMeta = {};
+            }
+
+            if (newGuildID) {
+                this.ownGuildID = newGuildID;
+            }
+
+            // Update member metadata
+            for (const [charId, sharableData] of Object.entries(sharableMap)) {
+                const guildChar = guildCharacterMap[charId];
+                const inviterId = guildChar?.inviterCharacterID;
+                this.memberMeta[charId] = {
+                    name: sharableData.name,
+                    gameMode: sharableData.gameMode,
+                    joinTime: guildChar?.joinTime || null,
+                    invitedBy: sharableMap[inviterId]?.name || null,
+                };
+            }
+
+            const t = Date.now();
+
+            for (const [charId, guildChar] of Object.entries(guildCharacterMap)) {
+                if (!this.memberXPHistory[charId]) {
+                    this.memberXPHistory[charId] = [];
+                }
+                pushXP(this.memberXPHistory[charId], { t, xp: guildChar.guildExperience });
+            }
+
+            if (this.ownGuildID) {
+                storage.set(`memberXP_${this.ownGuildID}`, this.memberXPHistory, STORE_NAME);
+            }
+        }
+
+        /**
+         * Handle leaderboard_updated — record XP for all guilds on leaderboard.
+         * @param {Object} data - leaderboard_updated message
+         */
+        _onLeaderboardUpdated(data) {
+            if (data.leaderboardCategory !== 'guild') return;
+
+            const rows = data.leaderboard?.rows;
+            if (!rows || rows.length === 0) return;
+
+            const t = Date.now();
+
+            for (const row of rows) {
+                const name = row.name;
+                const xp = row.value2;
+                if (!name || xp === undefined) continue;
+
+                if (!this.guildXPHistory[name]) {
+                    this.guildXPHistory[name] = [];
+                }
+                pushXP(this.guildXPHistory[name], { t, xp });
+            }
+
+            // Persist using own guild name as key (all guild histories stored together)
+            if (this.ownGuildName) {
+                storage.set(`guildXP_${this.ownGuildName}`, this.guildXPHistory, STORE_NAME);
+            }
+        }
+
+        // ─── Public API (for display module) ─────────────────────────────────────
+
+        /**
+         * Get XP/hr stats for a guild.
+         * @param {string} guildName
+         * @returns {{lastXPH: number, lastHourXPH: number, lastDayXPH: number, chart: Array}}
+         */
+        getGuildStats(guildName) {
+            return calcStats(this.guildXPHistory[guildName]);
+        }
+
+        /**
+         * Get XP/hr stats for a guild member.
+         * @param {string} characterID
+         * @returns {{lastXPH: number, lastHourXPH: number, lastDayXPH: number, chart: Array}}
+         */
+        getMemberStats(characterID) {
+            return calcStats(this.memberXPHistory[characterID]);
+        }
+
+        /**
+         * Get metadata for a guild member.
+         * @param {string} characterID
+         * @returns {{name: string, gameMode: string, joinTime: string, invitedBy: string}|null}
+         */
+        getMemberMeta(characterID) {
+            return this.memberMeta[characterID] || null;
+        }
+
+        /**
+         * Get own guild name.
+         * @returns {string|null}
+         */
+        getOwnGuildName() {
+            return this.ownGuildName;
+        }
+
+        /**
+         * Get own guild ID.
+         * @returns {string|null}
+         */
+        getOwnGuildID() {
+            return this.ownGuildID;
+        }
+
+        /**
+         * Get guild creation date.
+         * @returns {string|null}
+         */
+        getGuildCreatedAt() {
+            return this.guildCreatedAt;
+        }
+
+        /**
+         * Get member list with IDs.
+         * @returns {Array<{characterID: string, name: string, gameMode: string, joinTime: string, invitedBy: string}>}
+         */
+        getMemberList() {
+            return Object.entries(this.memberMeta).map(([charId, meta]) => ({
+                characterID: charId,
+                ...meta,
+            }));
+        }
+
+        /**
+         * Get all guild XP histories (for leaderboard stats).
+         * @returns {Object} guildName → [{t, xp}]
+         */
+        getAllGuildHistories() {
+            return this.guildXPHistory;
+        }
+
+        /**
+         * Get current guild XP (latest recorded value).
+         * @param {string} guildName
+         * @returns {number|null}
+         */
+        getCurrentGuildXP(guildName) {
+            const history = this.guildXPHistory[guildName];
+            if (!history || history.length === 0) return null;
+            return history[history.length - 1].xp;
+        }
+
+        /**
+         * Get latest member XP.
+         * @param {string} characterID
+         * @returns {number|null}
+         */
+        getMemberXP(characterID) {
+            const history = this.memberXPHistory[characterID];
+            if (!history || history.length === 0) return null;
+            return history[history.length - 1].xp;
+        }
+
+        /**
+         * Calculate time to next guild level.
+         * @param {string} guildName
+         * @returns {number|null} Milliseconds, or null
+         */
+        getTimeToLevel(guildName) {
+            const currentXP = this.getCurrentGuildXP(guildName);
+            if (currentXP === null) return null;
+
+            const stats = this.getGuildStats(guildName);
+            const rate = stats.lastDayXPH > 0 ? stats.lastDayXPH : stats.lastXPH;
+            return calcTimeToLevel(currentXP, rate);
+        }
+
+        /**
+         * Reset member XP history for the current guild.
+         * Used to clear corrupted data (e.g., after a guild switch).
+         */
+        async resetMemberData() {
+            if (!this.ownGuildID) return;
+            this.memberXPHistory = {};
+            await storage.set(`memberXP_${this.ownGuildID}`, {}, STORE_NAME);
+        }
+
+        /**
+         * Cleanup when disabled.
+         */
+        disable() {
+            for (const unregister of this.unregisterHandlers) {
+                unregister();
+            }
+            this.unregisterHandlers = [];
+
+            this.ownGuildName = null;
+            this.ownGuildID = null;
+            this.guildCreatedAt = null;
+            this.guildXPHistory = {};
+            this.memberXPHistory = {};
+            this.memberMeta = {};
+            this.initialized = false;
+        }
+    }
+
+    const guildXPTracker = new GuildXPTracker();
+
+    var guildXPTracker$1 = {
+        name: 'Guild XP Tracker',
+        initialize: () => guildXPTracker.initialize(),
+        cleanup: () => guildXPTracker.disable(),
+        resetMemberData: () => guildXPTracker.resetMemberData(),
+    };
+
+    /**
+     * Guild XP Display
+     * Injects XP/hr stats, charts, and sortable columns into
+     * the Guild Overview, Members, and Guild Leaderboard tabs.
+     */
+
+
+    const CSS_PREFIX = 'mwi-guild-xp';
+
+    // ─── Formatting helpers ─────────────────────────────────────────────────────
+
+    /**
+     * Format a duration in ms to a human-readable string.
+     * @param {number} ms
+     * @returns {string}
+     */
+    function formatTimeLeft(ms) {
+        const m1 = 60 * 1000;
+        const h1 = 60 * 60 * 1000;
+        const d1 = 24 * 60 * 60 * 1000;
+        const w1 = 7 * d1;
+
+        const w = Math.floor(ms / w1);
+        const d = Math.floor((ms % w1) / d1);
+        const h = Math.floor((ms % d1) / h1);
+        const m = Math.ceil((ms % h1) / m1);
+
+        const s = (n) => (n === 1 ? '' : 's');
+        const parts = [];
+
+        if (w >= 1) parts.push(`${w} week${s(w)}`);
+        if (d >= 1) parts.push(`${d} day${s(d)}`);
+        if (ms < w1 && h >= 1) parts.push(`${h} hour${s(h)}`);
+        if (ms < 6 * h1 && m >= 1) parts.push(`${m} minute${s(m)}`);
+
+        return parts.join(' ') || '< 1 minute';
+    }
+
+    /**
+     * Format number with non-breaking spaces as thousands separator (for chart display).
+     * @param {number} n
+     * @returns {string}
+     */
+    function fNum(n) {
+        return formatters_js.formatWithSeparator(Math.round(n));
+    }
+
+    /**
+     * Get ranking emoji for top 3 places.
+     * @param {number} rank - 1-indexed rank
+     * @returns {string} HTML
+     */
+    function rankBadge(rank) {
+        if (rank <= 3) {
+            return ['&#x1F947;', '&#x1F948;', '&#x1F949;'][rank - 1];
+        }
+        return `<span style="color: var(--color-disabled);">#${rank}</span>`;
+    }
+
+    // ─── Chart rendering ────────────────────────────────────────────────────────
+
+    /**
+     * Build a bar chart HTML string from chart data.
+     * @param {Array<{t: number, tD: number, xpH: number}>} chart
+     * @returns {string} HTML
+     */
+    function buildChart(chart) {
+        if (chart.length === 0) return '<div style="color: var(--color-disabled);">Not enough data for chart</div>';
+
+        // Truncate outliers at 2x the median
+        let maxXPH = 0;
+        let tDSum = 0;
+        let hasTruncated = false;
+
+        if (chart.length >= 2) {
+            const sorted = chart.slice().sort((a, b) => a.xpH - b.xpH);
+            const per50 = sorted[Math.ceil(chart.length / 2)].xpH;
+
+            for (const d of chart) {
+                if (d.xpH > per50 * 2) {
+                    d.truncated = true;
+                    hasTruncated = true;
+                }
+            }
+        }
+
+        for (const d of chart) {
+            tDSum += d.tD;
+            if (!d.truncated) {
+                maxXPH = Math.max(maxXPH, d.xpH);
+            }
+        }
+
+        if (hasTruncated) {
+            maxXPH *= 1.1;
+        }
+
+        if (maxXPH <= 0) return '';
+
+        const minT = chart[0].t;
+        const maxT = chart[chart.length - 1].t;
+
+        // Horizontal legend (day boundaries)
+        const hLegend = [];
+        const lastDayStart = new Date(maxT);
+        lastDayStart.setHours(0, 0, 0, 0);
+        let lt = lastDayStart.getTime();
+
+        while (lt > minT) {
+            hLegend.unshift({ t: lt });
+            lt = new Date(lt);
+            lt.setDate(lt.getDate() - 1);
+            lt = lt.getTime();
+        }
+
+        if (hLegend.length === 0) {
+            hLegend.unshift({ t: minT });
+        } else if (hLegend[0].t - minT > tDSum / 10) {
+            hLegend.unshift({ t: minT });
+        }
+
+        if (hLegend.length > 0 && maxT - hLegend[hLegend.length - 1].t > tDSum / 10) {
+            hLegend.push({ t: maxT });
+        }
+
+        // Build bars
+        let barsHTML = '';
+        for (const d of chart) {
+            const heightPct = ((d.truncated ? maxXPH : d.xpH) / maxXPH) * 100;
+            const widthPct = (d.tD / tDSum) * 100;
+            const bgStyle = d.truncated
+                ? 'background-image: linear-gradient(45deg, var(--color-space-300) 25%, transparent 25%, transparent 50%, var(--color-space-300) 50%, var(--color-space-300) 75%, transparent 75%); background-size: 10px 10px;'
+                : 'background-color: var(--color-space-300);';
+
+            barsHTML += `<div class="${CSS_PREFIX}__bar"
+            style="height: ${heightPct}%; width: ${widthPct}%; ${bgStyle}"
+            data-xph="${d.xpH}"
+            ${d.truncated ? 'data-truncated="true"' : ''}
+            data-t="${d.t}"></div>`;
+        }
+
+        // Build legend
+        let legendHTML = '';
+        for (let i = 0; i < hLegend.length; i++) {
+            const d = hLegend[i];
+            const leftPct = ((d.t - minT) / tDSum) * 100;
+            // Clamp first label left-aligned, last label right-aligned, middle labels centered
+            let labelTransform = 'translate(-50%, 0)';
+            if (i === 0 && leftPct < 10) labelTransform = 'translate(0, 0)';
+            else if (i === hLegend.length - 1 && leftPct > 90) labelTransform = 'translate(-100%, 0)';
+            legendHTML += `<div style="position: absolute; top: 0; left: ${leftPct}%; flex-direction: column;">
+            <div style="width: 1px; height: 8px; background-color: var(--color-space-300);"></div>
+            <div style="font-size: 10px; width: 80px; transform: ${labelTransform};">${new Date(d.t).toLocaleString()}</div>
+        </div>`;
+        }
+
+        return `
+        <div class="${CSS_PREFIX}" style="
+            display: grid;
+            grid-template-columns: auto auto 1fr;
+            grid-template-rows: 1fr auto;
+            width: calc(100% - 56px);
+            height: calc(100% - 28px * 3 - 14px);
+            margin-top: 28px;
+            margin-left: 28px;
+            gap: 2px;
+        ">
+            <div style="display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
+                <div style="font-size: 10px; transform: translate(0, -50%);">${fNum(maxXPH)}</div>
+                <div style="font-size: 10px;">${fNum(maxXPH / 2)}</div>
+                <div style="font-size: 10px; transform: translate(0, 50%);">0</div>
+            </div>
+            <div style="display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
+                <div style="width: 8px; height: 1px; background-color: var(--color-space-300);"></div>
+                <div style="width: 8px; height: 1px; background-color: var(--color-space-300);"></div>
+                <div style="width: 8px; height: 1px; background-color: var(--color-space-300);"></div>
+            </div>
+            <div style="flex: 1 1; display: flex; align-items: flex-end; height: 100%; gap: 1px;">
+                ${barsHTML}
+            </div>
+            <div></div>
+            <div></div>
+            <div style="flex: 0 0; position: relative; height: 28px; overflow: visible;">
+                ${legendHTML}
+            </div>
+        </div>`;
+    }
+
+    // ─── Column sort helpers ────────────────────────────────────────────────────
+
+    /**
+     * Sort icon HTML.
+     * @param {string} direction - 'asc', 'desc', or 'none'
+     * @returns {string} HTML
+     */
+    function sortIcon(direction) {
+        return `<span class="${CSS_PREFIX}__sort-icon" style="display: inline-flex; flex-direction: column; vertical-align: middle; margin-left: 2px;">
+        <span style="font-size: 8px; line-height: 8px;">${direction === 'asc' ? '\u25B2' : '\u25B3'}</span>
+        <span style="font-size: 8px; line-height: 8px;">${direction === 'desc' ? '\u25BC' : '\u25BD'}</span>
+    </span>`;
+    }
+
+    /**
+     * Make a column header sortable.
+     * @param {HTMLElement} thEl - Header cell
+     * @param {Object} options
+     * @param {string} options.sortId - Unique sort identifier
+     * @param {Function} options.valueGetter - (trEl) => number|string
+     * @param {boolean} [options.skipFirst=false] - Skip first body row (sticky row)
+     */
+    function makeColumnSortable(thEl, options) {
+        const tableEl = thEl.closest('table');
+        if (!tableEl) return;
+
+        thEl.dataset.sortId = options.sortId;
+        thEl.style.cursor = 'pointer';
+        thEl.insertAdjacentHTML('beforeend', sortIcon('none'));
+
+        thEl.addEventListener('click', () => {
+            const tbodyEl = tableEl.querySelector('tbody');
+            if (!tbodyEl) return;
+
+            // Toggle direction
+            if (tableEl.dataset.sortId === options.sortId) {
+                tableEl.dataset.sortDirection = tableEl.dataset.sortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                tableEl.dataset.sortId = options.sortId;
+                tableEl.dataset.sortDirection = 'desc';
+            }
+
+            const direction = tableEl.dataset.sortDirection;
+
+            let rows = Array.from(tbodyEl.children);
+            if (options.skipFirst) {
+                rows = rows.slice(1);
+            }
+
+            rows.sort((a, b) => {
+                const av = options.valueGetter(a);
+                const bv = options.valueGetter(b);
+                if (typeof av === 'number' && typeof bv === 'number') {
+                    return direction === 'asc' ? av - bv : bv - av;
+                }
+                const sa = String(av);
+                const sb = String(bv);
+                return direction === 'asc' ? sa.localeCompare(sb) : sb.localeCompare(sa);
+            });
+
+            for (const row of rows) {
+                tbodyEl.appendChild(row);
+            }
+
+            // Update all sort icons in this table
+            const theadTr = thEl.parentElement;
+            for (const th of theadTr.children) {
+                const icon = th.querySelector(`.${CSS_PREFIX}__sort-icon`);
+                if (icon) {
+                    const d = th.dataset.sortId === tableEl.dataset.sortId ? direction : 'none';
+                    icon.outerHTML = sortIcon(d);
+                }
+            }
+        });
+    }
+
+    /**
+     * Add a column to a table.
+     * @param {HTMLElement} tableEl
+     * @param {Object} options
+     * @param {string} options.name - Column header text
+     * @param {Array} options.data - One value per body row
+     * @param {Function} [options.format] - (value, index) => HTML string
+     * @param {number} [options.insertAfter] - Column index to insert after
+     * @param {boolean} [options.makeSortable] - Whether to make column sortable
+     * @param {string} [options.sortId] - Sort identifier
+     * @param {boolean} [options.skipFirst] - Skip first row for sorting (leaderboard)
+     * @param {Array} [options.sortData] - Custom sort values (numbers) per row
+     */
+    function addColumn(tableEl, options) {
+        // Don't add duplicate columns
+        if (tableEl.querySelector(`th.${CSS_PREFIX}[data-name="${options.name}"]`)) return;
+
+        const theadTr = tableEl.querySelector('thead tr');
+        if (!theadTr) return;
+
+        const insertAfter = options.insertAfter !== undefined ? options.insertAfter : theadTr.children.length - 1;
+
+        // Add header
+        const th = document.createElement('th');
+        th.className = CSS_PREFIX;
+        th.dataset.name = options.name;
+        th.textContent = options.name;
+
+        if (insertAfter < theadTr.children.length - 1) {
+            theadTr.children[insertAfter + 1].insertAdjacentElement('beforebegin', th);
+        } else {
+            theadTr.appendChild(th);
+        }
+
+        // Add body cells
+        const tbodyEl = tableEl.querySelector('tbody');
+        const rows = Array.from(tbodyEl.children);
+
+        for (let i = 0; i < rows.length; i++) {
+            const td = document.createElement('td');
+            td.className = CSS_PREFIX;
+
+            const value = i < options.data.length ? options.data[i] : null;
+            if (options.format) {
+                td.innerHTML = options.format(value, i);
+            } else if (value === null || value === undefined || (typeof value === 'number' && isNaN(value))) {
+                td.textContent = '';
+            } else if (typeof value === 'number') {
+                td.textContent = fNum(value);
+            } else {
+                td.textContent = value;
+            }
+
+            // Store sort value
+            if (options.sortData) {
+                td._sortValue = options.sortData[i];
+            } else if (typeof value === 'number') {
+                td._sortValue = value;
+            }
+
+            const refChild = rows[i].children[insertAfter + 1];
+            if (refChild) {
+                refChild.insertAdjacentElement('beforebegin', td);
+            } else {
+                rows[i].appendChild(td);
+            }
+        }
+
+        // Make sortable
+        if (options.makeSortable) {
+            const colIndex = Array.from(theadTr.children).indexOf(th);
+            makeColumnSortable(th, {
+                sortId: options.sortId || options.name,
+                skipFirst: options.skipFirst || false,
+                valueGetter: (trEl) => {
+                    const cell = trEl.children[colIndex];
+                    if (cell && cell._sortValue !== undefined) return cell._sortValue;
+                    const text = cell?.textContent?.replace(/[^\d.-]/g, '');
+                    return text ? parseFloat(text) : 0;
+                },
+            });
+        }
+    }
+
+    // ─── Display class ──────────────────────────────────────────────────────────
+
+    class GuildXPDisplay {
+        constructor() {
+            this.initialized = false;
+            this.unregisterObservers = [];
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        initialize() {
+            if (this.initialized) return;
+            if (!config.getSetting('guildXPDisplay', true)) return;
+
+            // Watch for Guild panel tabs
+            const unregOverview = domObserver.onClass('GuildXPDisplay-Overview', 'GuildPanel_dataGrid', (el) =>
+                this._renderOverview(el)
+            );
+            this.unregisterObservers.push(unregOverview);
+
+            const unregMembers = domObserver.onClass('GuildXPDisplay-Members', 'GuildPanel_membersTable', (el) =>
+                this._renderMembers(el)
+            );
+            this.unregisterObservers.push(unregMembers);
+
+            // Watch for guild leaderboard
+            const unregLeaderboard = domObserver.onClass(
+                'GuildXPDisplay-Leaderboard',
+                'LeaderboardPanel_leaderboardTable',
+                (el) => this._renderLeaderboard(el)
+            );
+            this.unregisterObservers.push(unregLeaderboard);
+
+            // Live refresh on data updates
+            this._boundRefreshOverview = () => this._refreshOverviewIfVisible();
+            this._boundRefreshMembers = () => this._refreshMembersIfVisible();
+            this._boundRefreshLeaderboard = (data) => {
+                if (data.leaderboardCategory === 'guild') this._refreshLeaderboardIfVisible();
+            };
+
+            webSocketHook.on('guild_updated', this._boundRefreshOverview);
+            webSocketHook.on('guild_characters_updated', this._boundRefreshMembers);
+            webSocketHook.on('leaderboard_updated', this._boundRefreshLeaderboard);
+
+            this.unregisterObservers.push(() => {
+                webSocketHook.off('guild_updated', this._boundRefreshOverview);
+                webSocketHook.off('guild_characters_updated', this._boundRefreshMembers);
+                webSocketHook.off('leaderboard_updated', this._boundRefreshLeaderboard);
+            });
+
+            this.initialized = true;
+        }
+
+        // ─── Overview tab ────────────────────────────────────────────────────────
+
+        _renderOverview(dataGridEl) {
+            // Remove previous injection
+            dataGridEl.querySelectorAll(`.${CSS_PREFIX}`).forEach((el) => el.remove());
+
+            const guildName = guildXPTracker.getOwnGuildName();
+            if (!guildName) return;
+
+            const stats = guildXPTracker.getGuildStats(guildName);
+
+            // XP/h stats row
+            const rateLabel = stats.lastHourXPH > 0 ? 'Last hour XP/h' : 'Last XP/h';
+            const rateValue = stats.lastHourXPH > 0 ? stats.lastHourXPH : stats.lastXPH;
+
+            const statsHTML = `
+            <div class="GuildPanel_dataBlockGroup__1d2rR ${CSS_PREFIX}">
+                <div class="GuildPanel_dataBlock__3qVhK">
+                    <div class="GuildPanel_label__-A63g">${rateLabel}</div>
+                    <div class="GuildPanel_value__Hm2I9">${fNum(rateValue)}</div>
+                </div>
+                <div class="GuildPanel_dataBlock__3qVhK">
+                    <div class="GuildPanel_label__-A63g">Last day XP/h</div>
+                    <div class="GuildPanel_value__Hm2I9">${fNum(stats.lastDayXPH)}</div>
+                </div>
+            </div>`;
+
+            // Chart row
+            const chartHTML = `
+            <div class="GuildPanel_dataBlockGroup__1d2rR ${CSS_PREFIX}" style="grid-column: 1 / 3; max-width: none;">
+                <div class="GuildPanel_dataBlock__3qVhK" style="height: 240px;">
+                    <div class="GuildPanel_label__-A63g">Last week XP/h</div>
+                    ${buildChart(stats.chart)}
+                </div>
+            </div>`;
+
+            dataGridEl.insertAdjacentHTML('beforeend', statsHTML + chartHTML);
+
+            // Attach chart bar event listeners
+            dataGridEl.querySelectorAll(`.${CSS_PREFIX}__bar`).forEach((bar) => {
+                bar.addEventListener('mouseenter', this._onBarEnter);
+                bar.addEventListener('mouseleave', this._onBarLeave);
+            });
+
+            // Time to level
+            const timeToLevel = guildXPTracker.getTimeToLevel(guildName);
+            if (timeToLevel !== null) {
+                const ttlHTML = `<div class="${CSS_PREFIX}" style="color: var(--color-space-300); font-size: 13px;">${formatTimeLeft(timeToLevel)}</div>`;
+                // Find the "Exp to Next Level" data block and append
+                const dataBlocks = dataGridEl.querySelectorAll('.GuildPanel_dataBlock__3qVhK');
+                for (const block of dataBlocks) {
+                    const label = block.querySelector('.GuildPanel_label__-A63g');
+                    if (label && label.textContent.includes('Exp to')) {
+                        block.insertAdjacentHTML('beforeend', ttlHTML);
+                        break;
+                    }
+                }
+            }
+        }
+
+        _refreshOverviewIfVisible() {
+            const dataGridEl = document.querySelector('[class*="GuildPanel_dataGrid"]');
+            if (dataGridEl) {
+                this._renderOverview(dataGridEl);
+            }
+        }
+
+        // ─── Members tab ─────────────────────────────────────────────────────────
+
+        _renderMembers(tableEl) {
+            // Skip if already rendered
+            if (tableEl.querySelector(`.${CSS_PREFIX}`)) return;
+
+            const guildID = guildXPTracker.getOwnGuildID();
+            if (!guildID) return;
+
+            const memberList = guildXPTracker.getMemberList();
+            if (memberList.length === 0) return;
+
+            // Widen the container
+            const containerEl = tableEl.closest('[class*="GuildPanel_membersTab"]');
+            if (containerEl) {
+                containerEl.style.maxWidth = '1100px';
+            }
+
+            // Build name → characterID map from table rows
+            const tbodyEl = tableEl.querySelector('tbody');
+            if (!tbodyEl) return;
+
+            const rows = Array.from(tbodyEl.children);
+            const nameToCharId = {};
+            for (const member of memberList) {
+                nameToCharId[member.name] = member.characterID;
+            }
+
+            // Calculate stats for each row
+            const allStats = [];
+            for (const row of rows) {
+                const name = row.children[0]?.textContent?.trim();
+                const charId = nameToCharId[name];
+                const memberStats = charId ? guildXPTracker.getMemberStats(charId) : { lastXPH: 0, lastDayXPH: 0 };
+                const meta = charId ? guildXPTracker.getMemberMeta(charId) : null;
+                const xp = charId ? guildXPTracker.getMemberXP(charId) : 0;
+
+                allStats.push({
+                    name,
+                    charId,
+                    lastXPH: memberStats.lastXPH,
+                    lastDayXPH: memberStats.lastDayXPH,
+                    gameMode: meta?.gameMode || 'standard',
+                    joinTime: meta?.joinTime || null,
+                    xp: xp || 0,
+                });
+            }
+
+            // Compute rankings
+            const byLastXPH = allStats.slice().sort((a, b) => b.lastXPH - a.lastXPH);
+            const byLastDayXPH = allStats.slice().sort((a, b) => b.lastDayXPH - a.lastDayXPH);
+            for (let i = 0; i < byLastXPH.length; i++) byLastXPH[i].lastXPH_rank = i + 1;
+            for (let i = 0; i < byLastDayXPH.length; i++) byLastDayXPH[i].lastDayXPH_rank = i + 1;
+
+            const theadTr = tableEl.querySelector('thead tr');
+            if (!theadTr) return;
+
+            // Find Activity column index for inserting before it
+            const activityIndex = Array.from(theadTr.children).findIndex((el) => el.textContent.trim() === 'Activity');
+            const insertAfter = activityIndex > 0 ? activityIndex - 1 : theadTr.children.length - 1;
+
+            const gameModes = { standard: 'MC', ironcow: 'IC', legacy_ironcow: 'LC' };
+
+            // Game Mode column
+            addColumn(tableEl, {
+                name: 'Game Mode',
+                insertAfter,
+                data: allStats.map((s) => s.gameMode),
+                format: (v) => gameModes[v] || v || '',
+                makeSortable: true,
+                sortId: 'gameMode',
+                sortData: allStats.map((s) => s.gameMode || ''),
+            });
+
+            // Joined column
+            addColumn(tableEl, {
+                name: 'Joined',
+                insertAfter: insertAfter + 1,
+                data: allStats.map((s) => s.joinTime),
+                format: (v) => (v ? new Date(v).toLocaleDateString() : ''),
+                makeSortable: true,
+                sortId: 'joinTime',
+                sortData: allStats.map((s) => (s.joinTime ? +new Date(s.joinTime) : 0)),
+            });
+
+            // Last XP/h column
+            addColumn(tableEl, {
+                name: 'Last XP/h',
+                insertAfter: insertAfter + 2,
+                data: allStats.map((s) => s.lastXPH),
+                format: (v, i) => {
+                    if (!v || v <= 0) return '';
+                    return `${fNum(v)} ${rankBadge(allStats[i].lastXPH_rank)}`;
+                },
+                makeSortable: true,
+                sortId: 'lastXPH',
+                sortData: allStats.map((s) => s.lastXPH),
+            });
+
+            // Last day XP/h column
+            addColumn(tableEl, {
+                name: 'Last day XP/h',
+                insertAfter: insertAfter + 3,
+                data: allStats.map((s) => s.lastDayXPH),
+                format: (v, i) => {
+                    if (!v || v <= 0) return '';
+                    return `${fNum(v)} ${rankBadge(allStats[i].lastDayXPH_rank)}`;
+                },
+                makeSortable: true,
+                sortId: 'lastDayXPH',
+                sortData: allStats.map((s) => s.lastDayXPH),
+            });
+
+            // Make existing columns sortable
+            const nameHeader = theadTr.children[0];
+            if (nameHeader && !nameHeader.querySelector(`.${CSS_PREFIX}__sort-icon`)) {
+                makeColumnSortable(nameHeader, {
+                    sortId: 'name',
+                    valueGetter: (trEl) => trEl.children[0]?.textContent?.trim() || '',
+                });
+            }
+
+            // Guild Exp column
+            const expHeader = Array.from(theadTr.children).find((el) => el.textContent.includes('Guild Exp'));
+            if (expHeader && !expHeader.querySelector(`.${CSS_PREFIX}__sort-icon`)) {
+                makeColumnSortable(expHeader, {
+                    sortId: 'xp',
+                    valueGetter: (trEl) => {
+                        const name = trEl.children[0]?.textContent?.trim();
+                        const stat = allStats.find((s) => s.name === name);
+                        return stat?.xp || 0;
+                    },
+                });
+            }
+
+            // Role column
+            const rolePriority = { Leader: 1, General: 2, Officer: 3, Member: 4 };
+            const roleHeader = Array.from(theadTr.children).find((el) => el.textContent.trim() === 'Role');
+            if (roleHeader && !roleHeader.querySelector(`.${CSS_PREFIX}__sort-icon`)) {
+                const roleColIndex = Array.from(theadTr.children).indexOf(roleHeader);
+                makeColumnSortable(roleHeader, {
+                    sortId: 'role',
+                    valueGetter: (trEl) => {
+                        const text = trEl.children[roleColIndex]?.textContent?.trim() || '';
+                        return rolePriority[text] ?? 99;
+                    },
+                });
+            }
+
+            // Activity column
+            const activityHeader = Array.from(theadTr.children).find((el) => el.textContent.trim() === 'Activity');
+            if (activityHeader && !activityHeader.querySelector(`.${CSS_PREFIX}__sort-icon`)) {
+                const activityColIndex = Array.from(theadTr.children).indexOf(activityHeader);
+                makeColumnSortable(activityHeader, {
+                    sortId: 'activity',
+                    valueGetter: (trEl) => {
+                        const cell = trEl.children[activityColIndex];
+                        if (!cell) return Infinity;
+                        const text = cell.textContent?.trim() || '';
+                        // Parse "Xd ago" format
+                        const daysMatch = text.match(/(\d+)d\s*ago/);
+                        if (daysMatch) return parseInt(daysMatch[1], 10) * 1440;
+                        // Active players with SVG activity icons — group by href fragment
+                        const useEl = cell.querySelector('use');
+                        if (useEl) {
+                            const href = useEl.getAttribute('href') || useEl.getAttribute('xlink:href') || '';
+                            return href;
+                        }
+                        // Fallback
+                        return text || Infinity;
+                    },
+                });
+            }
+
+            // Status column
+            const statusHeader = Array.from(theadTr.children).find((el) => el.textContent.trim() === 'Status');
+            if (statusHeader && !statusHeader.querySelector(`.${CSS_PREFIX}__sort-icon`)) {
+                const statusColIndex = Array.from(theadTr.children).indexOf(statusHeader);
+                makeColumnSortable(statusHeader, {
+                    sortId: 'status',
+                    valueGetter: (trEl) => {
+                        const text = trEl.children[statusColIndex]?.textContent?.trim() || '';
+                        return text === 'Online' ? 0 : 1;
+                    },
+                });
+            }
+
+            // Highlight self-player row
+            const selfName = dataManager.getCurrentCharacterName();
+            if (selfName) {
+                for (const row of rows) {
+                    if (row.children[0]?.textContent?.trim() === selfName) {
+                        row.style.backgroundColor = 'rgba(74, 222, 128, 0.1)';
+                        break;
+                    }
+                }
+            }
+
+            // Highlight inactive players (orange for days inactive, red for 10d+)
+            if (activityHeader) {
+                const actColIndex = Array.from(theadTr.children).indexOf(activityHeader);
+                for (const row of rows) {
+                    // Skip self-player row
+                    if (selfName && row.children[0]?.textContent?.trim() === selfName) continue;
+                    const cell = row.children[actColIndex];
+                    if (!cell) continue;
+                    const text = cell.textContent?.trim() || '';
+                    const daysMatch = text.match(/(\d+)d\s*ago/);
+                    if (daysMatch) {
+                        const days = parseInt(daysMatch[1], 10);
+                        if (days >= 10) {
+                            row.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+                        } else {
+                            row.style.backgroundColor = 'rgba(251, 146, 60, 0.12)';
+                        }
+                    }
+                }
+            }
+        }
+
+        _refreshMembersIfVisible() {
+            // Members tab re-renders fully on data change, so DOM observer will re-fire.
+            // No explicit refresh needed.
+        }
+
+        // ─── Leaderboard tab ─────────────────────────────────────────────────────
+
+        _renderLeaderboard(tableEl) {
+            // Skip if already rendered
+            if (tableEl.querySelector(`.${CSS_PREFIX}`)) return;
+
+            const allHistories = guildXPTracker.getAllGuildHistories();
+            if (!allHistories || Object.keys(allHistories).length === 0) return;
+
+            // Widen container
+            const containerEl = tableEl.closest('[class*="LeaderboardPanel_content"]');
+            if (containerEl) {
+                containerEl.style.maxWidth = '1000px';
+            }
+
+            const tbodyEl = tableEl.querySelector('tbody');
+            if (!tbodyEl) return;
+
+            const rows = Array.from(tbodyEl.children);
+            const theadTr = tableEl.querySelector('thead tr');
+            if (!theadTr) return;
+
+            // Calculate stats for each guild row
+            const allStats = [];
+            for (const row of rows) {
+                // Leaderboard: col[0]=Rank, col[1]=Name
+                const name = row.children[1]?.textContent?.trim();
+                const stats = name ? guildXPTracker.getGuildStats(name) : { lastXPH: 0, lastDayXPH: 0 };
+                allStats.push({
+                    name,
+                    lastXPH: stats.lastXPH,
+                    lastDayXPH: stats.lastDayXPH,
+                });
+            }
+
+            // Compute rankings
+            const byLastXPH = allStats.slice().sort((a, b) => b.lastXPH - a.lastXPH);
+            const byLastDayXPH = allStats.slice().sort((a, b) => b.lastDayXPH - a.lastDayXPH);
+            for (let i = 0; i < byLastXPH.length; i++) byLastXPH[i].lastXPH_rank = i + 1;
+            for (let i = 0; i < byLastDayXPH.length; i++) byLastDayXPH[i].lastDayXPH_rank = i + 1;
+
+            const insertAfter = theadTr.children.length - 1;
+
+            // Last XP/h
+            addColumn(tableEl, {
+                name: 'Last XP/h',
+                insertAfter,
+                data: allStats.map((s) => s.lastXPH),
+                format: (v, i) => {
+                    if (!v || v <= 0) return '';
+                    return `${fNum(v)} ${rankBadge(allStats[i].lastXPH_rank)}`;
+                },
+                makeSortable: true,
+                sortId: 'lastXPH',
+                skipFirst: true,
+                sortData: allStats.map((s) => s.lastXPH),
+            });
+
+            // Last day XP/h
+            addColumn(tableEl, {
+                name: 'Last day XP/h',
+                insertAfter: insertAfter + 1,
+                data: allStats.map((s) => s.lastDayXPH),
+                format: (v, i) => {
+                    if (!v || v <= 0) return '';
+                    return `${fNum(v)} ${rankBadge(allStats[i].lastDayXPH_rank)}`;
+                },
+                makeSortable: true,
+                sortId: 'lastDayXPH',
+                skipFirst: true,
+                sortData: allStats.map((s) => s.lastDayXPH),
+            });
+
+            // Make Rank column sortable
+            const rankHeader = Array.from(theadTr.children).find((el) => el.textContent.trim() === 'Rank');
+            if (rankHeader && !rankHeader.querySelector(`.${CSS_PREFIX}__sort-icon`)) {
+                makeColumnSortable(rankHeader, {
+                    sortId: 'rank',
+                    skipFirst: true,
+                    valueGetter: (trEl) => {
+                        const text = trEl.children[0]?.textContent?.replace(/[^\d]/g, '');
+                        return text ? parseInt(text, 10) : 0;
+                    },
+                });
+            }
+        }
+
+        _refreshLeaderboardIfVisible() {
+            const tableEl = document.querySelector('[class*="LeaderboardPanel_leaderboardTable"]');
+            if (tableEl) {
+                // Remove existing columns and re-render
+                tableEl.querySelectorAll(`.${CSS_PREFIX}`).forEach((el) => el.remove());
+                this._renderLeaderboard(tableEl);
+            }
+        }
+
+        // ─── Chart tooltip handlers ──────────────────────────────────────────────
+
+        _onBarEnter(event) {
+            const el = event.target;
+            const xpH = parseFloat(el.dataset.xph);
+            const t = parseInt(el.dataset.t, 10);
+            const truncated = el.dataset.truncated === 'true';
+
+            const bb = el.getBoundingClientRect();
+            const dbb = document.body.getBoundingClientRect();
+
+            const tooltipHTML = `<div role="tooltip"
+            class="${CSS_PREFIX}__tooltip MuiPopper-root MuiTooltip-popper css-112l0a2"
+            style="position: absolute; inset: auto auto 0px 0px; margin: 0px; transform: translate(${Math.floor(bb.x - dbb.x)}px, ${Math.floor(bb.y - dbb.bottom)}px) translate(-50%, 0);"
+            data-popper-placement="top">
+            <div class="MuiTooltip-tooltip MuiTooltip-tooltipPlacementTop css-1spb1s5" style="opacity: 1;">
+                <div class="ItemTooltipText_itemTooltipText__zFq3A">
+                    <div class="ItemTooltipText_name__2JAHA">
+                        <span>${new Date(t).toLocaleString()}</span>
+                    </div>
+                    <div>
+                        <span>${fNum(xpH)} XP/h${truncated ? ' (anomalous)' : ''}</span>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+
+            // Remove existing tooltip
+            document.body.querySelectorAll(`.${CSS_PREFIX}__tooltip`).forEach((el) => el.remove());
+            document.body.insertAdjacentHTML('beforeend', tooltipHTML);
+        }
+
+        _onBarLeave() {
+            document.body.querySelectorAll(`.${CSS_PREFIX}__tooltip`).forEach((el) => el.remove());
+        }
+
+        // ─── Cleanup ─────────────────────────────────────────────────────────────
+
+        disable() {
+            for (const unregister of this.unregisterObservers) {
+                unregister();
+            }
+            this.unregisterObservers = [];
+            this.timerRegistry.clearAll();
+
+            // Remove all injected elements
+            document.querySelectorAll(`.${CSS_PREFIX}`).forEach((el) => el.remove());
+            document.querySelectorAll(`.${CSS_PREFIX}__tooltip`).forEach((el) => el.remove());
+
+            this.initialized = false;
+        }
+    }
+
+    const guildXPDisplay = new GuildXPDisplay();
+
+    var guildXPDisplay$1 = {
+        name: 'Guild XP Display',
+        initialize: () => guildXPDisplay.initialize(),
+        cleanup: () => guildXPDisplay.disable(),
+    };
+
+    /**
+     * Empty Queue Notification
+     * Sends browser notification when action queue becomes empty
+     */
+
+
+    class EmptyQueueNotification {
+        constructor() {
+            this.wasEmpty = false;
+            this.unregisterHandlers = [];
+            this.permissionGranted = false;
+            this.characterSwitchingHandler = null;
+            this.timerRegistry = timerRegistry_js.createTimerRegistry();
+        }
+
+        /**
+         * Initialize empty queue notification
+         */
+        async initialize() {
+            if (!config.getSetting('notifiEmptyAction')) {
+                return;
+            }
+
+            // Request notification permission
+            await this.requestPermission();
+
+            // Listen for action updates
+            this.registerWebSocketListeners();
+
+            this.characterSwitchingHandler = () => {
+                this.disable();
+            };
+
+            dataManager.on('character_switching', this.characterSwitchingHandler);
+        }
+
+        /**
+         * Request browser notification permission
+         */
+        async requestPermission() {
+            if (!('Notification' in window)) {
+                console.warn('[Empty Queue Notification] Browser notifications not supported');
+                return;
+            }
+
+            if (Notification.permission === 'granted') {
+                this.permissionGranted = true;
+                return;
+            }
+
+            if (Notification.permission !== 'denied') {
+                try {
+                    const permission = await Notification.requestPermission();
+                    this.permissionGranted = permission === 'granted';
+                } catch (error) {
+                    console.warn('[Empty Queue Notification] Permission request failed:', error);
+                }
+            }
+        }
+
+        /**
+         * Register WebSocket message listeners
+         */
+        registerWebSocketListeners() {
+            const actionsHandler = (data) => {
+                this.checkActionQueue(data);
+            };
+
+            webSocketHook.on('actions_updated', actionsHandler);
+
+            this.unregisterHandlers.push(() => {
+                webSocketHook.off('actions_updated', actionsHandler);
+            });
+        }
+
+        /**
+         * Check if action queue is empty and send notification
+         * @param {Object} _data - WebSocket data (unused, but kept for handler signature)
+         */
+        checkActionQueue(_data) {
+            if (!config.getSetting('notifiEmptyAction')) {
+                return;
+            }
+
+            if (!this.permissionGranted) {
+                return;
+            }
+
+            // Get current actions from dataManager (source of truth for all queued actions)
+            const allActions = dataManager.getCurrentActions();
+            const isEmpty = allActions.length === 0;
+
+            // Only notify on transition from not-empty to empty
+            if (isEmpty && !this.wasEmpty) {
+                this.sendNotification();
+            }
+
+            this.wasEmpty = isEmpty;
+        }
+
+        /**
+         * Send browser notification
+         */
+        sendNotification() {
+            try {
+                if (typeof Notification === 'undefined') {
+                    console.error('[Empty Queue Notification] Notification API not available');
+                    return;
+                }
+
+                if (Notification.permission !== 'granted') {
+                    console.error('[Empty Queue Notification] Notification permission not granted');
+                    return;
+                }
+
+                // Use standard Notification API
+                const notification = new Notification('Milky Way Idle', {
+                    body: 'Your action queue is empty!',
+                    icon: 'https://www.milkywayidle.com/favicon.ico',
+                    tag: 'empty-queue',
+                    requireInteraction: false,
+                });
+
+                notification.onclick = () => {
+                    window.focus();
+                    notification.close();
+                };
+
+                notification.onerror = (error) => {
+                    console.error('[Empty Queue Notification] Notification error:', error);
+                };
+
+                // Auto-close after 5 seconds
+                const closeTimeout = setTimeout(() => notification.close(), 5000);
+                this.timerRegistry.registerTimeout(closeTimeout);
+            } catch (error) {
+                console.error('[Empty Queue Notification] Failed to send notification:', error);
+            }
+        }
+
+        /**
+         * Cleanup
+         */
+        disable() {
+            if (this.characterSwitchingHandler) {
+                dataManager.off('character_switching', this.characterSwitchingHandler);
+                this.characterSwitchingHandler = null;
+            }
+
+            this.unregisterHandlers.forEach((unregister) => unregister());
+            this.unregisterHandlers = [];
+            this.wasEmpty = false;
+            this.timerRegistry.clearAll();
+        }
+    }
+
+    const emptyQueueNotification = new EmptyQueueNotification();
+
+    /**
+     * UI Library
+     * UI enhancements, tasks, skills, house, settings, and misc features
+     *
+     * Exports to: window.Toolasha.UI
+     */
+
+
+    // Export to global namespace
+    const toolashaRoot = window.Toolasha || {};
+    window.Toolasha = toolashaRoot;
+
+    if (typeof unsafeWindow !== 'undefined') {
+        unsafeWindow.Toolasha = toolashaRoot;
+    }
+
+    toolashaRoot.UI = {
+        equipmentLevelDisplay,
+        alchemyItemDimming,
+        skillExperiencePercentage,
+        externalLinks,
+        altClickNavigation,
+        collectionNavigation: collectionNavigation$1,
+        chatCommands,
+        mentionTracker,
+        popOutChat,
+        chatBlockList: chatBlockList$1,
+        taskProfitDisplay,
+        taskRerollTracker,
+        taskSorter,
+        taskIcons,
+        taskInventoryHighlighter,
+        taskStatistics,
+        remainingXP,
+        xpTracker: xpTracker$1,
+        lootLogStats,
+        housePanelObserver,
+        settingsUI,
+        transmuteRates,
+        viewActionButton,
+        transmuteHistoryTracker: transmuteHistoryTracker$1,
+        transmuteHistoryViewer: transmuteHistoryViewer$1,
+        coinifyHistoryTracker: coinifyHistoryTracker$1,
+        coinifyHistoryViewer: coinifyHistoryViewer$1,
+        enhancementFeature,
+        guildXPTracker: guildXPTracker$1,
+        guildXPDisplay: guildXPDisplay$1,
+        emptyQueueNotification,
+    };
+
+    console.log('[Toolasha] UI library loaded');
+
+})(Toolasha.Core.config, Toolasha.Core.dataManager, Toolasha.Core.domObserver, Toolasha.Utils.formatters, Toolasha.Utils.timerRegistry, Toolasha.Utils.domObserverHelpers, Toolasha.Core.webSocketHook, Toolasha.Utils.reactInput, Toolasha.Utils.actionPanelHelper, Toolasha.Market.expectedValueCalculator, Toolasha.Utils.equipmentParser, Toolasha.Utils.teaParser, Toolasha.Utils.bonusRevenueCalculator, Toolasha.Utils.marketData, Toolasha.Utils.profitConstants, Toolasha.Utils.efficiency, Toolasha.Utils.profitHelpers, Toolasha.Market.profitCalculator, Toolasha.Utils.selectors, Toolasha.Core.storage, Toolasha.Core.marketAPI, Toolasha.Utils.cleanupRegistry, Toolasha.Core, Toolasha.Core.settingsStorage, Toolasha.Utils.enhancementCalculator, Toolasha.Utils.enhancementConfig);
